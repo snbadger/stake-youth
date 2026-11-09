@@ -16,7 +16,6 @@ const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())
 const parse = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const today = () => iso(new Date());
 const addDays = (s, n) => { const d = parse(s); d.setDate(d.getDate() + n); return iso(d); };
-const addYears = (s, n) => { const d = parse(s); d.setFullYear(d.getFullYear() + n); return iso(d); };
 const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 864e5);
 const fmtDate = (s, o = { month: 'short', day: 'numeric' }) => (s ? parse(s).toLocaleDateString(undefined, o) : '');
 const fmtTime = t => {
@@ -59,7 +58,6 @@ const CHECKLIST = [
   ['Program', 'Invite speakers', -60],
   ['Activities', 'Plan activities and any service project', -45],
   ['Communication', 'Send the announcement to wards and youth leaders', -45],
-  ['Safety', 'Confirm adult leaders have current youth protection training (GH 10.8.1)', -30],
   ['Food', 'Plan the menu and food assignments; ask about allergies', -30],
   ['Transportation', 'Arrange transportation and drivers', -21],
   ['Safety', 'Collect parent permission and medical release forms', -14],
@@ -144,9 +142,7 @@ function demoApi() {
   return {
     async load(pin) {
       const role = need(pin);
-      const d = clone(db);
-      if (role !== 'adult') d.people.forEach(p => delete p.ypt_date);
-      return { role, ...d };
+      return { role, ...clone(db) };
     },
     async save(pin, actor, kind, row) {
       need(pin, true);
@@ -192,11 +188,11 @@ function demoApi() {
 
 function demoSeed() {
   const t = today();
-  const P = (name, role, ward, kind, ypt) => ({ id: uid(), name, role, ward, kind, ypt_date: ypt || null, active: true });
-  const pres = P('Stake YM President (sample)', 'Stake Young Men President', 'Stake', 'adult', addDays(t, -200));
-  const sec = P('Stake YM Secretary (sample)', 'Stake Young Men Secretary', 'Stake', 'adult', addDays(t, -400));
-  const yw = P('Stake YW President (sample)', 'Stake Young Women President', 'Stake', 'adult', null);
-  const bish = P('Bishopric Counselor (sample)', 'Bishopric', 'Ward 1', 'adult', addDays(t, -1200));
+  const P = (name, role, ward, kind) => ({ id: uid(), name, role, ward, kind, active: true });
+  const pres = P('Stake YM President (sample)', 'Stake Young Men President', 'Stake', 'adult');
+  const sec = P('Stake YM Secretary (sample)', 'Stake Young Men Secretary', 'Stake', 'adult');
+  const yw = P('Stake YW President (sample)', 'Stake Young Women President', 'Stake', 'adult');
+  const bish = P('Bishopric Counselor (sample)', 'Bishopric', 'Ward 1', 'adult');
   const y1 = P('Youth Leader A (sample)', 'Priests quorum assistant', 'Ward 1', 'youth');
   const y2 = P('Youth Leader B (sample)', 'Young Women class president', 'Ward 2', 'youth');
   const yc = {
@@ -247,15 +243,6 @@ function normalize(d) {
     events: (d.events || []).map(e => ({ ...e, adults: e.adults || [], start_time: t5(e.start_time), end_time: t5(e.end_time) })),
   };
 }
-
-function yptStatus(p) {
-  if (!p.ypt_date) return 'missing';
-  const exp = addYears(p.ypt_date, 3);
-  if (exp < today()) return 'expired';
-  if (exp <= addDays(today(), 60)) return 'soon';
-  return 'ok';
-}
-const YPT_LABEL = { missing: 'No training date', expired: 'Training expired', soon: 'Training due soon', ok: 'Training current' };
 
 /* ---------- small pieces ---------- */
 const empty = msg => `<p class="empty">${esc(msg)}</p>`;
@@ -380,10 +367,6 @@ function nav() {
 function alerts() {
   const t = today();
   const out = [];
-  const ypt = S.data.people.filter(p => p.kind === 'adult' && p.active !== false && yptStatus(p) !== 'ok');
-  if (ypt.length) {
-    out.push(`<button class="alert" data-act="go" data-view="people">${ICON.shield}<span><b>${ypt.length} adult leader${ypt.length > 1 ? 's' : ''}</b> missing or due for youth protection training</span></button>`);
-  }
   S.data.events
     .filter(e => e.start_date >= t && e.start_date <= addDays(t, 60) && youthEvent(e) && e.adults.length < 2)
     .sort(byEventDate)
@@ -542,15 +525,12 @@ function vPeople() {
   return `<button class="back" data-act="go" data-view="more">‹ More</button>
     <div class="page-h"><h2>Leaders</h2>${isAdult() ? '<button class="btn primary" data-act="new-person">+ Person</button>' : ''}</div>
     <div class="chips"><button class="chip ${kind === 'adult' ? 'on' : ''}" data-act="kind" data-k="adult">Adult leaders</button><button class="chip ${kind === 'youth' ? 'on' : ''}" data-act="kind" data-k="youth">Youth leaders</button></div>
-    ${kind === 'adult' && isAdult() ? '<p class="muted intro">Adults who work with youth complete youth protection training within one month of being sustained and every three years (General Handbook 10.8.1). Add each person\'s training date to track it here.</p>' : ''}
     ${kind === 'youth' ? '<p class="muted intro">First name and last initial is enough for youth leaders.</p>' : ''}
     ${[...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0])).map(([w, ps]) => `<section class="card"><div class="card-h"><h3>${esc(w)}</h3></div>
       ${ps.map(p => {
-        const st = kind === 'adult' && isAdult() ? yptStatus(p) : null;
         const open = S.data.tasks.filter(x => !x.done && x.owner_id === p.id).length;
         return `<button class="row-item" data-act="person" data-id="${p.id}"><span class="avatar">${esc(initials(p.name))}</span>
-          <span class="grow"><span class="ttl">${esc(p.name)}${p.active === false ? ' <span class="muted">(inactive)</span>' : ''}</span><span class="meta">${esc(p.role || '')}${open ? ` · ${open} open task${open > 1 ? 's' : ''}` : ''}</span></span>
-          ${st ? pill(YPT_LABEL[st], st === 'ok' ? 'ok' : st === 'soon' ? 'warn' : 'danger') : ''}</button>`;
+          <span class="grow"><span class="ttl">${esc(p.name)}${p.active === false ? ' <span class="muted">(inactive)</span>' : ''}</span><span class="meta">${esc(p.role || '')}${open ? ` · ${open} open task${open > 1 ? 's' : ''}` : ''}</span></span></button>`;
       }).join('')}</section>`).join('') || `<section class="card">${empty('Nobody here yet.')}</section>`}`;
 }
 
@@ -693,7 +673,7 @@ function projectSheet(p) {
     <label>Status<select name="status">${Object.entries(STATUSES).map(([k, l]) => opt(k, l, k === (p.status || 'planning'))).join('')}</select></label>
     <label>Purpose <small class="muted">what the youth want this to accomplish</small><textarea name="purpose" rows="3">${esc(p.purpose || '')}</textarea></label>
     <label>Notes<textarea name="notes" rows="3">${esc(p.notes || '')}</textarea></label>
-    ${p.id ? '' : '<label class="check-row"><input type="checkbox" name="checklist" checked> Start with the planning checklist (18 tasks you can edit)</label>'}
+    ${p.id ? '' : '<label class="check-row"><input type="checkbox" name="checklist" checked> Start with the planning checklist (${CHECKLIST.length} tasks you can edit)</label>'}
     <div class="btn-row"><button class="btn primary" type="submit">Save</button>
       ${p.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="project" data-id="${p.id}">Delete</button>` : ''}</div>
   </form>`;
@@ -715,7 +695,6 @@ function personSheet(p) {
       <label>Ward<select name="ward">${['Stake', ...wards()].map(w => opt(w, w, w === p.ward)).join('')}${p.ward && !['Stake', ...wards()].includes(p.ward) ? opt(p.ward, p.ward, true) : ''}</select></label>
     </div>
     <datalist id="roles">${ROLES.map(r => `<option value="${esc(r)}">`).join('')}</datalist>
-    <label class="adult-only">Youth protection training completed <small class="muted">adults only</small><input type="date" name="ypt_date" value="${esc(p.ypt_date || '')}"></label>
     <label class="check-row"><input type="checkbox" name="active" ${p.active === false ? '' : 'checked'}> Active (shows in lists)</label>
     <div class="btn-row"><button class="btn primary" type="submit">Save</button>
       ${p.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="person" data-id="${p.id}">Delete</button>` : ''}</div>
@@ -787,7 +766,7 @@ const FORMS = {
   async person(f) {
     const v = vals(f);
     await busy(f, async () => {
-      await save('person', { id: v.id || undefined, name: v.name, kind: v.kind, role: v.role, ward: v.ward, ypt_date: v.kind === 'adult' ? v.ypt_date || null : null, active: !!v.active });
+      await save('person', { id: v.id || undefined, name: v.name, kind: v.kind, role: v.role, ward: v.ward, active: !!v.active });
       S.kind = v.kind; closeSheet(); render(); toast('Saved');
     });
   },
@@ -902,7 +881,7 @@ const ACTIONS = {
   async checklist(el) {
     const p = byId('projects', el.dataset.id);
     const has = S.data.tasks.some(x => x.project_id === p.id);
-    const msg = (has ? 'This project already has tasks. Add the 18 checklist tasks anyway?' : 'Add the 18-task planning checklist?')
+    const msg = (has ? `This project already has tasks. Add the ${CHECKLIST.length} checklist tasks anyway?` : `Add the ${CHECKLIST.length}-task planning checklist?`)
       + (p.event_date ? '' : '\n\nThe project has no event date yet, so the tasks will have no due dates.');
     if (!confirm(msg)) return;
     await busy(null, async () => { await addChecklist(p); render(); toast('Checklist added. Assign owners next.'); });

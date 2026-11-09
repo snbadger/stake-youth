@@ -29,7 +29,6 @@ icon.svg               App icon
 | See calendar, assignments, projects, leader list | yes | yes |
 | Check off tasks | any | only their own |
 | Add/edit/delete anything, settings, PINs | yes | no |
-| See youth protection training dates | yes | no |
 
 Everyone taps their name once per device (or types it). Youth leaders are listed as first name
 and last initial — the app never needs more than that.
@@ -54,7 +53,5 @@ labeled "(sample)"; reset it under More → Settings.
 ## Safety notes built in
 
 - Youth events with fewer than two adult leaders listed show a warning (General Handbook 10.8.1).
-- Each adult's youth protection training date is tracked; expired or missing dates show on the
-  home screen for adult leaders. Training is required within one month of being sustained and
-  every three years (General Handbook 10.8.1).
+- Youth protection training is tracked in LCR, not here.
 - Verify current guidance at churchofjesuschrist.org — the Resources screen links to it.

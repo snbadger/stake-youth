@@ -15,17 +15,17 @@ DRY = '--dry-run' in sys.argv
 PROJECT = 'Stake Youth Conference 2027'
 COCHAIRS = 'Youth leaders (co-chairs): Skylar S., Carson S., Teagan H., Hannah M. — co-chairs divide this among themselves.'
 
-# Adult leaders: the six recipients of the 2026-11-03 minutes email plus Stephen, with the
-# specialists the chart names. Callings not stated anywhere are [FILL IN]; last names that come
-# only from an email handle are marked [VERIFY].
+# Adult leaders: stake YM/YW presidencies per LCR (Fresno California North Stake, read 2026-11-08),
+# plus the specialists the chart names. Stake YM Second Counselor is vacant.
 ADULTS = [
-    ('Stephen Badger', 'Stake Young Men Secretary', 'Stake'),
-    ('David Castle', '[FILL IN calling]', 'Stake'),
-    ('Anona Davis', '[FILL IN calling]', 'Stake'),
-    ('Ashley Nicolls Burton [VERIFY]', '[FILL IN calling]', 'Stake'),
-    ('Kati Cunningham [VERIFY]', '[FILL IN calling]', 'Stake'),
-    ('Kiley Brook [VERIFY]', '[FILL IN calling]', 'Stake'),
-    ('Jake Tracy', '[FILL IN calling]', 'Stake'),
+    ('Stephen Badger', 'Stake Young Men Secretary', 'Dry Creek'),
+    ('David Castle', 'Stake Young Men President', 'Shepherd'),
+    ('Anona Davis', 'Stake Young Women President', 'Shepherd'),
+    ('Ashley Burton', 'Stake Young Women Second Counselor', 'Mountain View'),
+    ('Kati Cunningham', 'Stake Young Women Secretary', 'Shepherd'),
+    ('Kiley Powell', 'Stake Young Women First Counselor', 'Dry Creek'),
+    ('Jake Tracy', 'Stake Young Men First Counselor', 'Shepherd'),
+    ('Rachelle Kunkel', 'Stake Young Women Camp Director', 'Orchard View'),
     ('Trevor Davis', 'Specialist — mission prep', 'Shepherd'),
     ('Sarah Griffin', 'Specialist — senior choir', 'Wawona Ranch'),
     ('Jared Griffin', 'Specialist — senior choir', 'Wawona Ranch'),

@@ -19,7 +19,6 @@ create table if not exists sya_people (
   kind text not null check (kind in ('adult','youth')),
   role text default '',
   ward text default '',
-  ypt_date date,                       -- youth protection training completed (adults only)
   active boolean not null default true,
   created_at timestamptz default now(),
   created_by text,
@@ -129,8 +128,7 @@ begin
   return json_build_object(
     'role', v_role,
     'settings', coalesce((select json_object_agg(key, value) from sya_settings), '{}'::json),
-    'people', coalesce((select json_agg(case when v_role = 'adult' then to_jsonb(p) else to_jsonb(p) - 'ypt_date' end order by name)
-                        from sya_people p), '[]'::json),
+    'people', coalesce((select json_agg(to_json(p) order by name) from sya_people p), '[]'::json),
     'projects', coalesce((select json_agg(to_json(p) order by event_date nulls last) from sya_projects p), '[]'::json),
     'events', coalesce((select json_agg(to_json(e) order by start_date, start_time) from sya_events e), '[]'::json),
     'tasks', coalesce((select json_agg(to_json(t) order by due_date nulls last) from sya_tasks t), '[]'::json)
@@ -153,11 +151,11 @@ begin
   end if;
   v_id := coalesce((p_row->>'id')::uuid, gen_random_uuid());
   if p_kind = 'person' then
-    insert into sya_people as t (id, name, kind, role, ward, ypt_date, active, created_by, updated_by)
+    insert into sya_people as t (id, name, kind, role, ward, active, created_by, updated_by)
     values (v_id, p_row->>'name', p_row->>'kind', coalesce(p_row->>'role',''), coalesce(p_row->>'ward',''),
-            (p_row->>'ypt_date')::date, coalesce((p_row->>'active')::boolean, true), p_actor, p_actor)
+            coalesce((p_row->>'active')::boolean, true), p_actor, p_actor)
     on conflict (id) do update set name = excluded.name, kind = excluded.kind, role = excluded.role, ward = excluded.ward,
-      ypt_date = excluded.ypt_date, active = excluded.active, updated_at = now(), updated_by = p_actor;
+      active = excluded.active, updated_at = now(), updated_by = p_actor;
     select to_json(t) into v_out from sya_people t where id = v_id;
   elsif p_kind = 'project' then
     insert into sya_projects as t (id, title, kind, event_date, status, purpose, notes, adult_lead, youth_lead, created_by, updated_by)
