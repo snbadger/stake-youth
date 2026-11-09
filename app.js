@@ -38,8 +38,8 @@ const store = {
 };
 
 /* ---------- reference lists ---------- */
-const CATEGORIES = ['Stake activity', 'Youth conference', 'FSY', 'Devotional', 'Service', 'Temple', 'Camp', 'Leadership meeting', 'Other'];
-const AUDIENCES = ['All youth', 'Young men', 'Young women', 'Youth leaders', 'Youth and leaders', 'Adult leaders'];
+const CATEGORIES = ['Stake activity', 'Youth conference', 'FSY', 'Devotional', 'Service', 'Temple', 'Camp', 'Mission prep', 'Choir', 'Dance practice', 'Institute', 'Leadership meeting', 'Other'];
+const AUDIENCES = ['All youth', 'Seniors', 'Young men', 'Young women', 'Youth leaders', 'Youth and leaders', 'Adult leaders'];
 const PROJECT_KINDS = ['Youth conference', 'Stake activity', 'Devotional', 'Service project', 'Temple trip', 'Camp', 'Other'];
 const STATUSES = { planning: 'Planning', active: 'In progress', done: 'Done', cancelled: 'Cancelled' };
 const ROLES = [

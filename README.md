@@ -6,6 +6,10 @@ stake activities) with a planning checklist. Built the same way as the Morning S
 static HTML/CSS/JS, no build step, Supabase behind PIN-checked functions — but on its own church
 Supabase project. Nothing here touches Jericho's project.
 
+**Live:** https://snbadger.github.io/stake-youth/ (GitHub Pages from the separate repo
+`snbadger/stake-youth`, which is a copy of this folder without `PINS-private.txt`). This folder is
+the source of record; to deploy a change, copy the files into a clone of that repo and push.
+
 ## Files
 
 ```
