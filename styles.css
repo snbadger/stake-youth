@@ -220,6 +220,9 @@ h3 svg { vertical-align: -4px; margin-right: 4px; }
 .filter-row.end { justify-content: flex-end; }
 .toggle.sm button { min-height: 34px; padding: 0 10px; font-size: 13px; }
 .area-none { padding: 0 0 12px; margin: 0; }
+.members { margin: 0; padding: 0 0 12px; font-size: 14px; line-height: 1.5; }
+.members .lbl { font-weight: 600; margin-right: 4px; }
+.members + .task { border-top: 1px solid var(--line); }
 
 /* comments on an assignment */
 .cc { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; color: var(--muted); font-weight: 600; vertical-align: -2px; }

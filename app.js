@@ -160,7 +160,7 @@ const api = LIVE ? {
 } : demoApi();
 
 function demoApi() {
-  const K = 'sya_demo_v2';
+  const K = 'sya_demo_v3';
   let db = null;
   try { db = JSON.parse(localStorage.getItem(K)); } catch { /* ignore */ }
   if (!db) db = demoSeed();
@@ -249,7 +249,7 @@ function demoApi() {
 
 function demoSeed() {
   const t = today();
-  const P = (name, role, ward, kind) => ({ id: uid(), name, role, ward, kind, active: true });
+  const P = (name, role, ward, kind, committee = '') => ({ id: uid(), name, role, ward, kind, committee, active: true });
   const pres = P('Stake YM President (sample)', 'Stake Young Men President', 'Stake', 'adult');
   const sec = P('Stake YM Secretary (sample)', 'Stake Young Men Secretary', 'Stake', 'adult');
   const yw = P('Stake YW President (sample)', 'Stake Young Women President', 'Stake', 'adult');
@@ -260,6 +260,8 @@ function demoSeed() {
     id: uid(), title: 'Stake Youth Conference (sample)', kind: 'Youth conference', event_date: addDays(t, 75), status: 'planning',
     purpose: 'Sample project. Replace it with your real one.', notes: '', adult_lead: pres.id, youth_lead: y1.id,
   };
+  const seniors = [P('Senior A (sample)', 'SYC Co-chair', 'Ward 1', 'youth', 'Program'), P('Senior B (sample)', 'Senior', 'Ward 2', 'youth', 'Program'),
+    P('Senior C (sample)', 'Senior', 'Ward 3', 'youth', 'Activities'), P('Senior D (sample)', 'Senior', 'Ward 1', 'youth', 'Music')];
   const owners = [sec.id, pres.id, yw.id, y1.id, y2.id];
   const tasks = checklistTasks(yc).map((x, i) => ({ ...x, id: uid(), owner_id: owners[i % owners.length], done: i < 2 }));
   tasks.push({ id: uid(), title: 'Send the stake youth calendar to bishops (sample)', owner_id: sec.id, due_date: addDays(t, -2), area: '', project_id: null, notes: '', done: false });
@@ -303,7 +305,7 @@ function demoSeed() {
   tasks.push({ id: uid(), title: 'Buy food for the senior activity (sample)', owner_id: yw.id, due_date: addDays(t, 10), area: '', project_id: null, event_id: act.id, notes: '', done: false });
   return {
     settings: { stake_name: 'Demo Stake', wards: 'Ward 1\nWard 2\nWard 3' },
-    people: [pres, sec, yw, bish, y1, y2], projects: [yc], events, tasks, plan,
+    people: [pres, sec, yw, bish, y1, y2, ...seniors], projects: [yc], events, tasks, plan,
     comments: [
       { id: uid(), task_id: tasks[2].id, body: 'Sample comment. Use comments for updates and questions on an assignment.', author: pres.name, author_role: 'adult', created_at: new Date(Date.now() - 864e5).toISOString() },
       { id: uid(), task_id: tasks[2].id, body: 'Got it. I will have a draft by Sunday.', author: y1.name, author_role: 'youth', created_at: new Date(Date.now() - 36e5).toISOString() },
@@ -317,6 +319,7 @@ const S = {
   calFilter: 'all', calMode: 'month', calPast: false,            // calendar
   ptab: 'overview', pfilter: 'all', open: new Set(), amode: 'full',   // project page
   show: ['open', 'done', 'all'].includes(store.get('sya_show')) ? store.get('sya_show') : 'open',   // incomplete / completed / all tasks
+  pgroup: store.get('sya_pgroup') === 'committee' ? 'committee' : 'ward',   // leaders list: by ward or by committee
 };
 const isAdult = () => S.role === 'adult';
 const byId = (list, id) => (id ? S.data[list].find(x => x.id === id) : null);
@@ -366,7 +369,7 @@ function normalize(d) {
   const t5 = s => (s ? String(s).slice(0, 5) : '');
   return {
     settings: d.settings || {},
-    people: d.people || [],
+    people: (d.people || []).map(p => ({ ...p, committee: p.committee || '' })),
     projects: d.projects || [],
     tasks: d.tasks || [],
     events: (d.events || []).map(e => ({ ...e, adults: e.adults || [], start_time: t5(e.start_time), end_time: t5(e.end_time) })),
@@ -643,6 +646,15 @@ const TASK_FILTERS = {
   overdue: ['Overdue', x => !x.done && x.due_date && x.due_date < today()],
 };
 const areaOf = x => x.area || 'General';
+// A senior's committee is the name of a task area on the conference project (or any name an adult types in).
+const isChair = p => /co-?chair/i.test(p.role || '');
+const membersOf = a => S.data.people.filter(p => p.active !== false && p.committee === a).sort((x, y) => (isChair(y) - isChair(x)) || byName(x, y));
+const committeeNames = () => [...new Set([...S.data.tasks.filter(x => x.project_id && x.area).map(x => x.area), ...S.data.people.map(p => p.committee).filter(Boolean)])]
+  .sort((a, b) => a.localeCompare(b));
+const membersLine = a => {
+  const ms = membersOf(a);
+  return ms.length ? `<p class="members"><span class="lbl">Members (${ms.length})</span> ${ms.map(m => esc(m.name) + (isChair(m) ? ' <span class="muted">(co-chair)</span>' : '')).join(', ')}</p>` : '';
+};
 
 function vProject() {
   const p = byId('projects', S.sub);
@@ -698,22 +710,24 @@ function pTasks(p, tasks) {
   const f = TASK_FILTERS[S.pfilter] ? S.pfilter : 'all';
   const groups = new Map();
   tasks.forEach(x => { const a = areaOf(x); if (!groups.has(a)) groups.set(a, []); groups.get(a).push(x); });
+  if (p.kind === 'Youth conference') S.data.people.forEach(m => { if (m.committee && m.active !== false && !groups.has(m.committee)) groups.set(m.committee, []); });
   const rank = a => { const i = AREA_ORDER.indexOf(a); return i < 0 ? (a === 'General' ? -1 : 99) : i; };
   const areas = [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));
   const few = areas.length <= 3;
   const cards = areas.map(([a, xs]) => {
     const shown = xs.filter(shows).filter(TASK_FILTERS[f][1]);
     if (f !== 'all' && !shown.length) return '';
+    const members = p.kind === 'Youth conference' ? membersOf(a) : [];
     const open = few || f !== 'all' || S.open.has(a);
     const done = xs.filter(x => x.done).length;
     const undated = xs.filter(x => !x.done && !x.due_date).length;
     return `<section class="card area">
       <button class="area-h" data-act="area" data-a="${esc(a)}" aria-expanded="${open}">
-        <span class="grow"><span class="ttl">${esc(a)}</span><span class="bar"><i style="width:${Math.round((done / xs.length) * 100)}%"></i></span></span>
-        <span class="meta">${done}/${xs.length}</span>${few || f !== 'all' ? '' : `<span class="chev">${open ? '▾' : '▸'}</span>`}
+        <span class="grow"><span class="ttl">${esc(a)}</span><span class="bar"><i style="width:${xs.length ? Math.round((done / xs.length) * 100) : 0}%"></i></span></span>
+        <span class="meta">${members.length ? `${members.length} member${members.length > 1 ? 's' : ''} · ` : ''}${done}/${xs.length}</span>${few || f !== 'all' ? '' : `<span class="chev">${open ? '▾' : '▸'}</span>`}
       </button>
-      ${open ? (shown.sort((a, b) => (a.done - b.done) || byDue(a, b)).map(x => taskRow(x, false)).join('')
-        || `<p class="meta area-none">${S.show === 'open' ? 'All done here.' : S.show === 'done' ? 'Nothing completed yet.' : 'No tasks.'}</p>`) + (isAdult() ? `<div class="btn-row">
+      ${open ? membersLine(a) + (shown.sort((a, b) => (a.done - b.done) || byDue(a, b)).map(x => taskRow(x, false)).join('')
+        || `<p class="meta area-none">${!xs.length ? 'No tasks yet.' : S.show === 'open' ? 'All done here.' : S.show === 'done' ? 'Nothing completed yet.' : 'No tasks.'}</p>`) + (isAdult() ? `<div class="btn-row">
         <button class="btn" data-act="new-task" data-project="${p.id}" data-area="${esc(a)}">+ Task</button>
         ${undated ? `<button class="btn ghost" data-act="bulk-date" data-project="${p.id}" data-area="${esc(a)}">Set a due date for ${undated} undated</button>` : ''}</div>` : '') : ''}
     </section>`;
@@ -888,19 +902,24 @@ function vMore() {
 function vPeople() {
   const kind = S.kind;
   const list = S.data.people.filter(p => p.kind === kind).sort(byName);
+  const hasCommittees = list.some(p => p.committee);
+  const byCommittee = hasCommittees && S.pgroup === 'committee';
   const groups = new Map();
-  list.forEach(p => { const w = p.ward || 'No ward'; if (!groups.has(w)) groups.set(w, []); groups.get(w).push(p); });
-  const order = ['Stake', ...wards()];
-  const rank = w => { const i = order.indexOf(w); return i < 0 ? 99 : i; };
+  list.forEach(p => { const w = byCommittee ? (p.committee || 'No committee') : (p.ward || 'No ward'); if (!groups.has(w)) groups.set(w, []); groups.get(w).push(p); });
+  if (byCommittee) groups.forEach(ps => ps.sort((x, y) => (isChair(y) - isChair(x)) || byName(x, y)));
+  const order = byCommittee ? [] : ['Stake', ...wards()];
+  const rank = w => { const i = order.indexOf(w); return w === 'No committee' ? 100 : i < 0 ? 99 : i; };
   return `<button class="back" data-act="go" data-view="more">‹ More</button>
     <div class="page-h"><h2>Leaders</h2>${isAdult() ? '<button class="btn primary" data-act="new-person">+ Person</button>' : ''}</div>
     <div class="chips"><button class="chip ${kind === 'adult' ? 'on' : ''}" data-act="kind" data-k="adult">Adult leaders</button><button class="chip ${kind === 'youth' ? 'on' : ''}" data-act="kind" data-k="youth">Youth leaders</button></div>
     ${kind === 'youth' ? '<p class="muted intro">First name and last initial is enough for youth leaders.</p>' : ''}
-    ${[...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0])).map(([w, ps]) => `<section class="card"><div class="card-h"><h3>${esc(w)}</h3></div>
+    ${hasCommittees ? `<div class="filter-row end"><span class="toggle sm" role="group" aria-label="Group the list">${[['ward', 'By ward'], ['committee', 'By committee']].map(([k, l]) =>
+      `<button class="${(byCommittee ? 'committee' : 'ward') === k ? 'on' : ''}" data-act="pgroup" data-g="${k}">${l}</button>`).join('')}</span></div>` : ''}
+    ${[...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0])).map(([w, ps]) => `<section class="card"><div class="card-h"><h3>${esc(w)}</h3>${byCommittee ? `<span class="meta">${ps.length}</span>` : ''}</div>
       ${ps.map(p => {
         const open = S.data.tasks.filter(x => !x.done && x.owner_id === p.id).length;
         return `<button class="row-item" data-act="person" data-id="${p.id}"><span class="avatar">${esc(initials(p.name))}</span>
-          <span class="grow"><span class="ttl">${esc(p.name)}${p.active === false ? ' <span class="muted">(inactive)</span>' : ''}</span><span class="meta">${esc(p.role || '')}${open ? ` · ${open} open task${open > 1 ? 's' : ''}` : ''}</span></span></button>`;
+          <span class="grow"><span class="ttl">${esc(p.name)}${p.active === false ? ' <span class="muted">(inactive)</span>' : ''}</span><span class="meta">${esc([p.role, byCommittee ? p.ward : p.committee].filter(Boolean).join(' · '))}${open ? ` · ${open} open task${open > 1 ? 's' : ''}` : ''}</span></span></button>`;
       }).join('')}</section>`).join('') || `<section class="card">${empty('Nobody here yet.')}</section>`}`;
 }
 
@@ -1066,7 +1085,7 @@ function projectSheet(p) {
 function personSheet(p) {
   if (!isAdult()) {
     return sheetHead(p.name, p.kind === 'adult' ? 'Adult leader' : 'Youth leader') + `<dl class="facts">
-      <dt>Calling</dt><dd>${esc(p.role || '')}</dd><dt>Ward</dt><dd>${esc(p.ward || '')}</dd></dl>`;
+      <dt>Calling</dt><dd>${esc(p.role || '')}</dd><dt>Ward</dt><dd>${esc(p.ward || '')}</dd>${p.committee ? `<dt>Committee</dt><dd>${esc(p.committee)}</dd>` : ''}</dl>`;
   }
   const kind = p.kind || S.kind;
   return sheetHead(p.id ? 'Edit person' : 'Add person') + `<form data-form="person" class="stack">
@@ -1079,6 +1098,8 @@ function personSheet(p) {
       <label>Ward<select name="ward">${['Stake', ...wards()].map(w => opt(w, w, w === p.ward)).join('')}${p.ward && !['Stake', ...wards()].includes(p.ward) ? opt(p.ward, p.ward, true) : ''}</select></label>
     </div>
     <datalist id="roles">${ROLES.map(r => `<option value="${esc(r)}">`).join('')}</datalist>
+    <label>Committee <span class="muted">(optional)</span><input name="committee" list="committee-names" value="${esc(p.committee || '')}" placeholder="For seniors on a conference committee"></label>
+    <datalist id="committee-names">${committeeNames().map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     <label class="check-row"><input type="checkbox" name="active" ${p.active === false ? '' : 'checked'}> Active (shows in lists)</label>
     <div class="btn-row"><button class="btn primary" type="submit">Save</button>
       ${p.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="person" data-id="${p.id}">Delete</button>` : ''}</div>
@@ -1312,7 +1333,7 @@ const FORMS = {
   async person(f) {
     const v = vals(f);
     await busy(f, async () => {
-      await save('person', { id: v.id || undefined, name: v.name, kind: v.kind, role: v.role, ward: v.ward, active: !!v.active });
+      await save('person', { id: v.id || undefined, name: v.name, kind: v.kind, role: v.role, ward: v.ward, committee: (v.committee || '').trim(), active: !!v.active });
       S.kind = v.kind; closeSheet(); render(); toast('Saved');
     });
   },
@@ -1495,6 +1516,7 @@ const ACTIONS = {
   person: el => openSheet(personSheet(byId('people', el.dataset.id))),
   'new-person': () => openSheet(personSheet({ kind: S.kind, ward: 'Stake' })),
   kind: el => { S.kind = el.dataset.k; render(); },
+  pgroup: el => { S.pgroup = el.dataset.g; store.set('sya_pgroup', S.pgroup); render(); },
   filter: el => { S.filter = el.dataset.f; render(); },
   day: el => { const d = el.dataset.day; S.day = d && d !== S.day ? d : null; render(); },
   month: el => {

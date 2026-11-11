@@ -22,13 +22,17 @@ the source of record; to deploy a change, copy the files into a clone of that re
   one save. Mark an event "calendar note only" when there is nothing to plan.
 - **Needs attention** — the home screen lists events in the next 45 days that lack a location or
   a time.
-- **Projects (SYC)** — Overview, Committees (tasks grouped by committee, with filters for mine,
-  unassigned, no due date, overdue, and a bulk due-date setter), Timeline (tasks and events by
+- **Projects (SYC)** — Overview, Committees (tasks grouped by committee, each with its senior
+  members listed, with filters for mine, unassigned, no due date, overdue, and a bulk due-date
+  setter), Timeline (tasks and events by
   month), Agenda (the run of show by day, with views for seniors, chaperones, and a high-level
   version; printable), and Budget (approved, planned, spent, left).
 - **Assignments** — everyone's tasks, with owners and due dates. A toggle shows Incomplete,
   Completed, or All tasks (it also applies to a project's Committees and Timeline tabs, and is
   remembered on the device).
+- **Committee members** — each senior can be put on a committee (More → Leaders → tap a name).
+  The Leaders list can be grouped by ward or by committee, and each committee on the SYC page
+  lists its members, co-chair first.
 - **Comments** — each assignment has a comment thread for updates and questions. Anyone signed in
   can read and add comments; adults can delete any comment, youth only their own.
 
@@ -54,6 +58,13 @@ icon.svg               App icon
 | Comment on assignments | yes | yes |
 | Delete comments | any | only their own |
 | Add/edit/delete anything, settings, PINs | yes | no |
+
+## Loading from the shared Drive
+
+`tools/load_syc2027_drive.py` brings in the SYC 2027 Drive folder: the full senior calendar,
+the newer committee chart rows, and the timeline chart's due dates. `tools/load_senior_committees.py`
+sets each senior's committee from a private CSV (committee, name) that stays out of this repo.
+Both are dry runs unless you add `--load`, and both are safe to run again.
 
 Everyone taps their name once per device (or types it). Youth leaders are listed as first name
 and last initial — the app never needs more than that.

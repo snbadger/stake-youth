@@ -1,7 +1,7 @@
 -- Stake Youth app — database for a CHURCH Supabase project (never the Jericho one).
 -- Run once in the SQL editor. Then set the two PINs (bottom of this file).
 -- Upgrading a database that is already live: run this whole file again. It only adds what is
--- missing (new columns, the sya_plan and sya_comments tables) and replaces the functions; no data is changed.
+-- missing (new columns such as sya_people.committee, the sya_plan and sya_comments tables) and replaces the functions; no data is changed.
 --
 -- Model: every table has RLS on with NO policies, so the anon key cannot read or write
 -- anything directly. The app only calls the sya_* functions below, which check the PIN
@@ -141,6 +141,7 @@ alter table sya_events add column if not exists youth_count int;
 alter table sya_events add column if not exists adult_count int;
 alter table sya_tasks add column if not exists event_id uuid references sya_events(id) on delete cascade;
 alter table sya_plan add column if not exists detail text default '';
+alter table sya_people add column if not exists committee text default '';  -- which committee a senior serves on (matches a task area)
 
 -- PIN hashes and failed attempts. Never readable from the app.
 create table if not exists sya_auth (
@@ -222,10 +223,11 @@ begin
   end if;
   v_id := coalesce((p_row->>'id')::uuid, gen_random_uuid());
   if p_kind = 'person' then
-    insert into sya_people as t (id, name, kind, role, ward, active, created_by, updated_by)
-    values (v_id, p_row->>'name', p_row->>'kind', coalesce(p_row->>'role',''), coalesce(p_row->>'ward',''),
+    insert into sya_people as t (id, name, kind, role, ward, committee, active, created_by, updated_by)
+    values (v_id, p_row->>'name', p_row->>'kind', coalesce(p_row->>'role',''), coalesce(p_row->>'ward',''), coalesce(p_row->>'committee',''),
             coalesce((p_row->>'active')::boolean, true), p_actor, p_actor)
     on conflict (id) do update set name = excluded.name, kind = excluded.kind, role = excluded.role, ward = excluded.ward,
+      committee = case when p_row ? 'committee' then excluded.committee else t.committee end,
       active = excluded.active, updated_at = now(), updated_by = p_actor;
     select to_json(t) into v_out from sya_people t where id = v_id;
   elsif p_kind = 'project' then
