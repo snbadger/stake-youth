@@ -1,7 +1,7 @@
 -- Stake Youth app — database for a CHURCH Supabase project (never the Jericho one).
 -- Run once in the SQL editor. Then set the two PINs (bottom of this file).
 -- Upgrading a database that is already live: run this whole file again. It only adds what is
--- missing (new columns, the sya_plan table) and replaces the functions; no data is changed.
+-- missing (new columns, the sya_plan and sya_comments tables) and replaces the functions; no data is changed.
 --
 -- Model: every table has RLS on with NO policies, so the anon key cannot read or write
 -- anything directly. The app only calls the sya_* functions below, which check the PIN
@@ -123,6 +123,17 @@ create table if not exists sya_plan (
 create index if not exists sya_plan_event on sya_plan (event_id);
 create index if not exists sya_plan_project on sya_plan (project_id);
 
+-- Comments on an assignment. Anyone signed in (adult or youth PIN) can read and add them.
+create table if not exists sya_comments (
+  id uuid primary key default gen_random_uuid(),
+  task_id uuid not null references sya_tasks(id) on delete cascade,
+  body text not null,
+  author text not null default '',
+  author_role text not null default 'adult',
+  created_at timestamptz not null default now()
+);
+create index if not exists sya_comments_task on sya_comments (task_id);
+
 -- Columns added after the first release (no-ops on a new database).
 alter table sya_events add column if not exists info_only boolean not null default false;
 alter table sya_events add column if not exists recap text default '';
@@ -148,9 +159,10 @@ alter table sya_projects enable row level security;
 alter table sya_events enable row level security;
 alter table sya_tasks enable row level security;
 alter table sya_plan enable row level security;
+alter table sya_comments enable row level security;
 alter table sya_auth enable row level security;
 alter table sya_pin_attempts enable row level security;
-revoke all on sya_settings, sya_people, sya_projects, sya_events, sya_tasks, sya_plan, sya_auth, sya_pin_attempts from anon, authenticated;
+revoke all on sya_settings, sya_people, sya_projects, sya_events, sya_tasks, sya_plan, sya_comments, sya_auth, sya_pin_attempts from anon, authenticated;
 
 -- ---------- PIN check ----------
 create or replace function sya_check_pin(p_pin text) returns text
@@ -188,7 +200,8 @@ begin
     'tasks', coalesce((select json_agg(to_json(t) order by due_date nulls last) from sya_tasks t), '[]'::json),
     -- budget lines go to adult leaders only
     'plan', coalesce((select json_agg(to_json(x) order by day nulls first, start_time nulls first, sort, title) from sya_plan x
-                      where v_role = 'adult' or kind <> 'budget'), '[]'::json)
+                      where v_role = 'adult' or kind <> 'budget'), '[]'::json),
+    'comments', coalesce((select json_agg(to_json(c) order by created_at) from sya_comments c), '[]'::json)
   );
 end $$;
 
@@ -309,6 +322,40 @@ begin
   return v_out;
 end $$;
 
+-- ---------- comment on a task (anyone signed in) ----------
+create or replace function sya_comment(p_pin text, p_actor text, p_task uuid, p_body text) returns json
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role text := sya_check_pin(p_pin);
+  v_id uuid;
+  v_out json;
+begin
+  p_actor := left(btrim(coalesce(p_actor, '')), 80);
+  p_body := left(btrim(coalesce(p_body, '')), 2000);
+  if p_actor = '' then raise exception 'Choose your name first.'; end if;
+  if p_body = '' then raise exception 'Write something first.'; end if;
+  if not exists (select 1 from sya_tasks where id = p_task) then raise exception 'Not found.'; end if;
+  insert into sya_comments (task_id, body, author, author_role) values (p_task, p_body, p_actor, v_role) returning id into v_id;
+  select to_json(c) into v_out from sya_comments c where id = v_id;
+  return v_out;
+end $$;
+
+-- ---------- delete a comment. Adults: any. Youth: only their own. ----------
+create or replace function sya_comment_delete(p_pin text, p_actor text, p_id uuid) returns json
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role text := sya_check_pin(p_pin);
+  v_author text;
+begin
+  select author into v_author from sya_comments where id = p_id;
+  if not found then raise exception 'Not found.'; end if;
+  if v_role <> 'adult' and lower(v_author) <> lower(left(btrim(coalesce(p_actor, '')), 80)) then
+    raise exception 'You can only delete your own comments.';
+  end if;
+  delete from sya_comments where id = p_id;
+  return json_build_object('ok', true);
+end $$;
+
 -- ---------- change a PIN (adult only) ----------
 create or replace function sya_set_pin(p_pin text, p_which text, p_new text) returns json
 language plpgsql security definer set search_path = public, extensions as $$
@@ -326,7 +373,8 @@ end $$;
 
 revoke all on function sya_check_pin(text) from public, anon, authenticated;
 grant execute on function sya_load(text), sya_save(text, text, text, jsonb), sya_delete(text, text, text, uuid),
-  sya_task_done(text, text, uuid, boolean), sya_set_pin(text, text, text) to anon;
+  sya_task_done(text, text, uuid, boolean), sya_set_pin(text, text, text),
+  sya_comment(text, text, uuid, text), sya_comment_delete(text, text, uuid) to anon;
 
 -- ---------- first-time setup: pick your two PINs and run these two lines ----------
 -- insert into sya_auth (which, hash) values ('adult', crypt('CHANGE-ME-ADULT', gen_salt('bf'))) on conflict (which) do update set hash = excluded.hash;

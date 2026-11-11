@@ -26,7 +26,11 @@ the source of record; to deploy a change, copy the files into a clone of that re
   unassigned, no due date, overdue, and a bulk due-date setter), Timeline (tasks and events by
   month), Agenda (the run of show by day, with views for seniors, chaperones, and a high-level
   version; printable), and Budget (approved, planned, spent, left).
-- **Assignments** — everyone's tasks, with owners and due dates.
+- **Assignments** — everyone's tasks, with owners and due dates. A toggle shows Incomplete,
+  Completed, or All tasks (it also applies to a project's Committees and Timeline tabs, and is
+  remembered on the device).
+- **Comments** — each assignment has a comment thread for updates and questions. Anyone signed in
+  can read and add comments; adults can delete any comment, youth only their own.
 
 ## Files
 
@@ -47,6 +51,8 @@ icon.svg               App icon
 | See calendar, assignments, projects, leader list | yes | yes |
 | Check off tasks | any | only their own |
 | See budgets | yes | no (the server never sends them) |
+| Comment on assignments | yes | yes |
+| Delete comments | any | only their own |
 | Add/edit/delete anything, settings, PINs | yes | no |
 
 Everyone taps their name once per device (or types it). Youth leaders are listed as first name

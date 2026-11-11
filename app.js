@@ -130,6 +130,7 @@ const ICON = {
   gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>',
   user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>',
   out: '<svg viewBox="0 0 24 24"><path d="M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 8l-4 4 4 4M6 12h10"/></svg>',
+  chat: '<svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg>',
   alert: '<svg viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.5"/></svg>',
 };
 
@@ -153,6 +154,8 @@ const api = LIVE ? {
   save: (pin, actor, kind, row) => rpc('sya_save', { p_pin: pin, p_actor: actor, p_kind: kind, p_row: row }),
   remove: (pin, actor, kind, id) => rpc('sya_delete', { p_pin: pin, p_actor: actor, p_kind: kind, p_id: id }),
   taskDone: (pin, actor, id, done) => rpc('sya_task_done', { p_pin: pin, p_actor: actor, p_id: id, p_done: done }),
+  comment: (pin, actor, taskId, body) => rpc('sya_comment', { p_pin: pin, p_actor: actor, p_task: taskId, p_body: body }),
+  delComment: (pin, actor, id) => rpc('sya_comment_delete', { p_pin: pin, p_actor: actor, p_id: id }),
   setPin: (pin, which, next) => rpc('sya_set_pin', { p_pin: pin, p_which: which, p_new: next }),
 } : demoApi();
 
@@ -162,6 +165,7 @@ function demoApi() {
   try { db = JSON.parse(localStorage.getItem(K)); } catch { /* ignore */ }
   if (!db) db = demoSeed();
   if (!db.plan) db.plan = [];
+  if (!db.comments) db.comments = [];
   const persist = () => { try { localStorage.setItem(K, JSON.stringify(db)); } catch { /* ignore */ } };
   persist();
   const clone = x => JSON.parse(JSON.stringify(x));
@@ -207,6 +211,7 @@ function demoApi() {
         db.events.forEach(e => { e.adults = (e.adults || []).filter(a => a !== id); });
         db.projects.forEach(p => { if (p.adult_lead === id) p.adult_lead = null; if (p.youth_lead === id) p.youth_lead = null; });
       }
+      db.comments = db.comments.filter(c => db.tasks.some(t => t.id === c.task_id));
       persist();
       return { ok: true };
     },
@@ -219,6 +224,23 @@ function demoApi() {
       Object.assign(t, { done, done_at: done ? new Date().toISOString() : null, done_by: done ? actor : null });
       persist();
       return clone(t);
+    },
+    async comment(pin, actor, taskId, body) {
+      need(pin);
+      body = String(body || '').trim().slice(0, 2000);
+      if (!body) throw new Error('Write something first.');
+      if (!db.tasks.some(t => t.id === taskId)) throw new Error('Not found.');
+      const c = { id: uid(), task_id: taskId, body, author: actor, author_role: need(pin), created_at: new Date().toISOString() };
+      db.comments.push(c); persist();
+      return clone(c);
+    },
+    async delComment(pin, actor, id) {
+      const role = need(pin);
+      const c = db.comments.find(x => x.id === id);
+      if (!c) throw new Error('Not found.');
+      if (role !== 'adult' && c.author.toLowerCase() !== actor.toLowerCase()) throw new Error('You can only delete your own comments.');
+      db.comments = db.comments.filter(x => x.id !== id); persist();
+      return { ok: true };
     },
     async setPin() { throw new Error('Demo PINs are fixed: 1111 for adults, 2222 for youth.'); },
     reset() { db = demoSeed(); persist(); },
@@ -282,6 +304,10 @@ function demoSeed() {
   return {
     settings: { stake_name: 'Demo Stake', wards: 'Ward 1\nWard 2\nWard 3' },
     people: [pres, sec, yw, bish, y1, y2], projects: [yc], events, tasks, plan,
+    comments: [
+      { id: uid(), task_id: tasks[2].id, body: 'Sample comment. Use comments for updates and questions on an assignment.', author: pres.name, author_role: 'adult', created_at: new Date(Date.now() - 864e5).toISOString() },
+      { id: uid(), task_id: tasks[2].id, body: 'Got it. I will have a draft by Sunday.', author: y1.name, author_role: 'youth', created_at: new Date(Date.now() - 36e5).toISOString() },
+    ],
   };
 }
 
@@ -290,6 +316,7 @@ const S = {
   pin: null, role: null, me: null, data: null, view: 'home', sub: null, back: null, filter: 'mine', month: null, day: null, kind: 'adult', err: '', loadedAt: 0,
   calFilter: 'all', calMode: 'month', calPast: false,            // calendar
   ptab: 'overview', pfilter: 'all', open: new Set(), amode: 'full',   // project page
+  show: ['open', 'done', 'all'].includes(store.get('sya_show')) ? store.get('sya_show') : 'open',   // incomplete / completed / all tasks
 };
 const isAdult = () => S.role === 'adult';
 const byId = (list, id) => (id ? S.data[list].find(x => x.id === id) : null);
@@ -301,6 +328,18 @@ const isMine = x => {
 };
 const canToggle = x => isAdult() || isMine(x);
 const eventsOn = (d, list = S.data.events) => list.filter(e => e.start_date <= d && (e.end_date || e.start_date) >= d).sort(byEventDate);
+const SHOW = { open: 'Incomplete', done: 'Completed', all: 'All' };
+const shows = x => (S.show === 'all' ? true : S.show === 'done' ? !!x.done : !x.done);
+const showToggle = () => `<span class="toggle sm no-print" role="group" aria-label="Which tasks to show">${Object.entries(SHOW).map(([k, l]) =>
+  `<button class="${S.show === k ? 'on' : ''}" data-act="show" data-s="${k}" aria-pressed="${S.show === k}">${l}</button>`).join('')}</span>`;
+const commentsOn = id => S.data.comments.filter(c => c.task_id === id).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+function ago(ts) {
+  const m = Math.round((Date.now() - new Date(ts).getTime()) / 6e4);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  if (m < 60 * 24) return `${Math.round(m / 60)} hr ago`;
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 const upcoming = e => (e.end_date || e.start_date) >= today();
 const isSyc = e => e.category === 'Youth conference' || (byId('projects', e.project_id) || {}).kind === 'Youth conference';
 const planFor = (kind, scope) => S.data.plan.filter(x => x.kind === kind && (scope.project ? x.project_id === scope.project : x.event_id === scope.event));
@@ -331,6 +370,7 @@ function normalize(d) {
     projects: d.projects || [],
     tasks: d.tasks || [],
     events: (d.events || []).map(e => ({ ...e, adults: e.adults || [], start_time: t5(e.start_time), end_time: t5(e.end_time) })),
+    comments: d.comments || [],
     plan: (d.plan || []).map(x => ({ ...x, start_time: t5(x.start_time), end_time: t5(x.end_time), planned: num(x.planned), actual: num(x.actual) })),
   };
 }
@@ -372,6 +412,7 @@ function countdown(date) {
 
 function taskRow(x, showProject = true) {
   const owner = personName(x.owner_id);
+  const nc = S.data.comments.reduce((n, c) => n + (c.task_id === x.id), 0);
   const proj = showProject && x.project_id ? byId('projects', x.project_id) : null;
   const ev = showProject && x.event_id ? byId('events', x.event_id) : null;
   const meta = [owner ? esc(owner) : '<span class="muted">Unassigned</span>', proj ? esc(proj.title) : '', ev ? esc(`${ev.title} (${fmtDate(ev.start_date)})`) : ''].filter(Boolean).join(' · ');
@@ -379,7 +420,7 @@ function taskRow(x, showProject = true) {
     <button class="check" data-act="toggle" data-id="${x.id}" ${canToggle(x) ? '' : 'disabled'} aria-label="${x.done ? 'Mark not done' : 'Mark done'}">${x.done ? '✓' : ''}</button>
     <button class="task-main" data-act="task" data-id="${x.id}">
       <span class="ttl">${esc(x.title)}</span>
-      <span class="meta">${meta} ${dueChip(x)}</span>
+      <span class="meta">${meta} ${dueChip(x)}${nc ? ` <span class="cc" title="${nc} comment${nc > 1 ? 's' : ''}">${ICON.chat}${nc}</span>` : ''}</span>
     </button>
   </div>`;
 }
@@ -561,14 +602,13 @@ function calList(evs) {
 
 function vTasks() {
   const t = today();
-  const f = S.filter;
-  let list = S.data.tasks.slice();
-  if (f === 'mine') list = list.filter(x => !x.done && isMine(x));
+  const f = ['mine', 'all', 'overdue'].includes(S.filter) ? S.filter : 'mine';
+  let list = S.data.tasks.filter(shows);
+  if (f === 'mine') list = list.filter(isMine);
   else if (f === 'overdue') list = list.filter(x => !x.done && x.due_date && x.due_date < t);
-  else if (f === 'done') list = list.filter(x => x.done);
-  else list = list.filter(x => !x.done);
-  if (f === 'done') list.sort((a, b) => String(b.done_at || '').localeCompare(String(a.done_at || ''))); else list.sort(byDue);
-  const chips = [['mine', 'Mine'], ['all', 'Everyone'], ['overdue', 'Overdue'], ['done', 'Done']];
+  // Incomplete first by due date; completed after, newest first.
+  list.sort((a, b) => (a.done - b.done) || (a.done ? String(b.done_at || '').localeCompare(String(a.done_at || '')) : byDue(a, b)));
+  const chips = [['mine', 'Mine'], ['all', 'Everyone'], ['overdue', 'Overdue']];
   let body;
   if (f === 'all') {
     const groups = new Map();
@@ -578,9 +618,12 @@ function vTasks() {
   } else {
     body = list.map(x => taskRow(x)).join('');
   }
+  const none = f === 'overdue' ? (S.show === 'done' ? 'Overdue tasks are never completed ones. Switch to Incomplete or All.' : 'Nothing is overdue.')
+    : S.show === 'done' ? 'Nothing completed yet.'
+    : f === 'mine' ? (S.show === 'open' ? 'Nothing assigned to you. Nice work.' : 'Nothing assigned to you.') : 'Nothing here.';
   return `<div class="page-h"><h2>Assignments</h2>${isAdult() ? '<button class="btn primary" data-act="new-task">+ Assignment</button>' : ''}</div>
-    <div class="chips">${chips.map(([k, l]) => `<button class="chip ${f === k ? 'on' : ''}" data-act="filter" data-f="${k}">${l}</button>`).join('')}</div>
-    <section class="card">${body || empty(f === 'mine' ? 'Nothing assigned to you. Nice work.' : 'Nothing here.')}</section>`;
+    <div class="filter-row"><div class="chips flush">${chips.map(([k, l]) => `<button class="chip ${f === k ? 'on' : ''}" data-act="filter" data-f="${k}">${l}</button>`).join('')}</div>${showToggle()}</div>
+    <section class="card">${body || empty(none)}</section>`;
 }
 
 function vProjects() {
@@ -594,9 +637,9 @@ function vProjects() {
 
 const TASK_FILTERS = {
   all: ['All', () => true],
-  mine: ['Mine', x => !x.done && isMine(x)],
-  unassigned: ['Unassigned', x => !x.done && !x.owner_id],
-  undated: ['No due date', x => !x.done && !x.due_date],
+  mine: ['Mine', x => isMine(x)],
+  unassigned: ['Unassigned', x => !x.owner_id],
+  undated: ['No due date', x => !x.due_date],
   overdue: ['Overdue', x => !x.done && x.due_date && x.due_date < today()],
 };
 const areaOf = x => x.area || 'General';
@@ -643,8 +686,8 @@ function pOverview(p, tasks, evs) {
       </div>` : ''}
     </section>
     ${unassigned || undated ? `<section class="card"><div class="card-h"><h3>To sort out</h3></div><div class="chips flush">
-      ${unassigned ? `<button class="chip" data-act="pfilter" data-f="unassigned">${unassigned} unassigned ›</button>` : ''}
-      ${undated ? `<button class="chip" data-act="pfilter" data-f="undated">${undated} with no due date ›</button>` : ''}</div></section>` : ''}
+      ${unassigned ? `<button class="chip" data-act="pfilter" data-f="unassigned" data-open="1">${unassigned} unassigned ›</button>` : ''}
+      ${undated ? `<button class="chip" data-act="pfilter" data-f="undated" data-open="1">${undated} with no due date ›</button>` : ''}</div></section>` : ''}
     <section class="card"><div class="card-h"><h3>Next deadlines</h3><button class="link" data-act="ptab" data-t="timeline">Timeline</button></div>
       ${next.length ? next.map(x => taskRow(x, false)).join('') : empty(open.length ? 'No open task has a due date yet.' : 'No open tasks.')}</section>
     <section class="card"><div class="card-h"><h3>Events on the way</h3></div>
@@ -659,7 +702,7 @@ function pTasks(p, tasks) {
   const areas = [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));
   const few = areas.length <= 3;
   const cards = areas.map(([a, xs]) => {
-    const shown = xs.filter(TASK_FILTERS[f][1]);
+    const shown = xs.filter(shows).filter(TASK_FILTERS[f][1]);
     if (f !== 'all' && !shown.length) return '';
     const open = few || f !== 'all' || S.open.has(a);
     const done = xs.filter(x => x.done).length;
@@ -669,13 +712,14 @@ function pTasks(p, tasks) {
         <span class="grow"><span class="ttl">${esc(a)}</span><span class="bar"><i style="width:${Math.round((done / xs.length) * 100)}%"></i></span></span>
         <span class="meta">${done}/${xs.length}</span>${few || f !== 'all' ? '' : `<span class="chev">${open ? '▾' : '▸'}</span>`}
       </button>
-      ${open ? shown.sort(byDue).map(x => taskRow(x, false)).join('') + (isAdult() ? `<div class="btn-row">
+      ${open ? (shown.sort((a, b) => (a.done - b.done) || byDue(a, b)).map(x => taskRow(x, false)).join('')
+        || `<p class="meta area-none">${S.show === 'open' ? 'All done here.' : S.show === 'done' ? 'Nothing completed yet.' : 'No tasks.'}</p>`) + (isAdult() ? `<div class="btn-row">
         <button class="btn" data-act="new-task" data-project="${p.id}" data-area="${esc(a)}">+ Task</button>
         ${undated ? `<button class="btn ghost" data-act="bulk-date" data-project="${p.id}" data-area="${esc(a)}">Set a due date for ${undated} undated</button>` : ''}</div>` : '') : ''}
     </section>`;
   }).join('');
-  return `<div class="chips">${Object.entries(TASK_FILTERS).map(([k, [l, fn]]) =>
-      `<button class="chip sm ${f === k ? 'on' : ''}" data-act="pfilter" data-f="${k}">${l} <span class="n">${tasks.filter(fn).length}</span></button>`).join('')}</div>
+  return `<div class="filter-row"><div class="chips flush">${Object.entries(TASK_FILTERS).map(([k, [l, fn]]) =>
+      `<button class="chip sm ${f === k ? 'on' : ''}" data-act="pfilter" data-f="${k}">${l} <span class="n">${tasks.filter(shows).filter(fn).length}</span></button>`).join('')}</div>${showToggle()}</div>
     ${cards || `<section class="card">${empty(tasks.length ? 'Nothing matches.' : isAdult() ? 'No tasks yet. Add your own, or start with the planning checklist on the Overview tab.' : 'No tasks yet.')}</section>`}
     ${isAdult() || (!few && f === 'all') ? `<div class="btn-row">
       ${isAdult() ? `<button class="btn primary" data-act="new-task" data-project="${p.id}">+ Task</button>` : ''}
@@ -683,13 +727,14 @@ function pTasks(p, tasks) {
 }
 
 function pTimeline(p, tasks, evs) {
-  const items = [...tasks.filter(x => x.due_date).map(x => ({ d: x.due_date, html: taskRow(x, false) })), ...evs.map(e => ({ d: e.start_date, html: eventRow(e) }))]
+  const items = [...tasks.filter(x => x.due_date && shows(x)).map(x => ({ d: x.due_date, html: taskRow(x, false) })), ...evs.map(e => ({ d: e.start_date, html: eventRow(e) }))]
     .sort((a, b) => a.d.localeCompare(b.d));
   const undated = tasks.filter(x => !x.done && !x.due_date).length;
   const months = [...new Set(items.map(i => i.d.slice(0, 7)))];
   const cur = today().slice(0, 7);
-  return `${undated ? `<p class="muted intro">${undated} open task${undated > 1 ? 's have' : ' has'} no due date yet, so ${undated > 1 ? 'they are' : 'it is'} not on the timeline.
-      <button class="link" data-act="pfilter" data-f="undated">Set dates</button></p>` : ''}
+  return `<div class="filter-row end">${showToggle()}</div>
+    ${undated ? `<p class="muted intro">${undated} open task${undated > 1 ? 's have' : ' has'} no due date yet, so ${undated > 1 ? 'they are' : 'it is'} not on the timeline.
+      <button class="link" data-act="pfilter" data-f="undated" data-open="1">Set dates</button></p>` : ''}
     ${months.map(m => `<section class="card"><div class="card-h"><h3>${monthLabel(m)}</h3>${m === cur ? pill('This month') : ''}</div>
       ${items.filter(i => i.d.slice(0, 7) === m).map(i => i.html).join('')}</section>`).join('') || `<section class="card">${empty('Nothing has a date yet.')}</section>`}`;
 }
@@ -908,7 +953,31 @@ function personOptions(selected, kinds = ['adult', 'youth']) {
   }).join('');
 }
 
-function taskSheet(x) {
+// The assignment itself, then its comment thread.
+const taskSheet = x => taskForm(x) + commentsBlock(x);
+
+function commentsBlock(x) {
+  if (!x.id) return '';
+  const list = commentsOn(x.id);
+  const mine = c => String(c.author || '').toLowerCase() === S.me.name.toLowerCase();
+  return `<section class="comments"><h3>Comments${list.length ? ` <span class="muted">${list.length}</span>` : ''}</h3>
+    ${list.map(c => `<div class="comment"><span class="avatar sm">${esc(initials(c.author))}</span>
+      <div class="grow"><div class="meta"><b>${esc(c.author)}</b> · ${esc(ago(c.created_at))}${isAdult() || mine(c) ? ` · <button class="link sm" data-act="del-comment" data-id="${c.id}">Delete</button>` : ''}</div>
+      <div class="body">${rich(c.body)}</div></div></div>`).join('') || '<p class="meta">No comments yet.</p>'}
+    <form data-form="comment" class="comment-form">
+      <input type="hidden" name="task_id" value="${x.id}">
+      <textarea name="body" rows="2" maxlength="2000" required placeholder="Add an update or a question…" aria-label="Add a comment"></textarea>
+      <button class="btn primary" type="submit">Comment</button>
+    </form>
+    <p class="meta">Everyone who signs in to the app can read comments.</p></section>`;
+}
+function refreshComments(taskId) {
+  const el = $('#sheet-root .comments');
+  const x = byId('tasks', taskId);
+  if (el && x) el.outerHTML = commentsBlock(x);
+}
+
+function taskForm(x) {
   const ev = byId('events', x.event_id);
   if (!isAdult()) {
     const proj = byId('projects', x.project_id);
@@ -1200,6 +1269,13 @@ const FORMS = {
       closeSheet(); render(); toast('Saved');
     });
   },
+  async comment(f) {
+    const v = vals(f);
+    await busy(f, async () => {
+      S.data.comments.push(await api.comment(S.pin, S.me.name, v.task_id, v.body));
+      refreshComments(v.task_id); render();
+    });
+  },
   async recap(f) {
     const v = vals(f);
     await busy(f, async () => {
@@ -1327,6 +1403,8 @@ function downloadIcs(list, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
+function setShow(v) { S.show = v; store.set('sya_show', v); }
+
 function go(view, sub = null, back = null) {
   S.view = view; S.sub = sub; S.back = back;
   closeSheet(); render(); window.scrollTo(0, 0);
@@ -1371,7 +1449,17 @@ const ACTIONS = {
   'copy-plan': el => openSheet(copySheet(byId('events', el.dataset.id))),
   'bulk-date': el => openSheet(bulkDateSheet(byId('projects', el.dataset.project), el.dataset.area)),
   ptab: el => { S.ptab = el.dataset.t; render(); },
-  pfilter: el => { S.ptab = 'tasks'; S.pfilter = el.dataset.f; render(); },
+  pfilter: el => { S.ptab = 'tasks'; S.pfilter = el.dataset.f; if (el.dataset.open) setShow('open'); render(); },
+  show: el => { setShow(el.dataset.s); render(); },
+  async 'del-comment'(el) {
+    const c = S.data.comments.find(x => x.id === el.dataset.id);
+    if (!c || !confirm('Delete this comment?')) return;
+    await busy(null, async () => {
+      await api.delComment(S.pin, S.me.name, c.id);
+      S.data.comments = S.data.comments.filter(x => x.id !== c.id);
+      refreshComments(c.task_id); render();
+    });
+  },
   area: el => { const a = el.dataset.a; if (S.open.has(a)) S.open.delete(a); else S.open.add(a); render(); },
   'area-all': () => {
     if (S.open.size) S.open.clear();
@@ -1449,6 +1537,7 @@ const ACTIONS = {
         S.data.events.forEach(e => { e.adults = e.adults.filter(a => a !== id); });
         S.data.projects.forEach(p => { if (p.adult_lead === id) p.adult_lead = null; if (p.youth_lead === id) p.youth_lead = null; });
       }
+      S.data.comments = S.data.comments.filter(c => S.data.tasks.some(t => t.id === c.task_id));
       closeSheet(); render(); toast('Deleted');
     });
   },
