@@ -1,5 +1,7 @@
 -- Stake Youth app — database for a CHURCH Supabase project (never the Jericho one).
 -- Run once in the SQL editor. Then set the two PINs (bottom of this file).
+-- Upgrading a database that is already live: run this whole file again. It only adds what is
+-- missing (new columns, the sya_plan table) and replaces the functions; no data is changed.
 --
 -- Model: every table has RLS on with NO policies, so the anon key cannot read or write
 -- anything directly. The app only calls the sya_* functions below, which check the PIN
@@ -55,6 +57,10 @@ create table if not exists sya_events (
   description text default '',
   project_id uuid references sya_projects(id) on delete set null,
   adults uuid[] not null default '{}',  -- adult leaders attending
+  info_only boolean not null default false,  -- calendar note: nothing to plan, no adult leaders needed
+  recap text default '',                -- after the event: what to keep or change
+  youth_count int,                      -- after the event: attendance
+  adult_count int,
   created_at timestamptz default now(),
   created_by text,
   updated_at timestamptz default now(),
@@ -69,6 +75,7 @@ create table if not exists sya_tasks (
   due_date date,
   owner_id uuid references sya_people(id) on delete set null,
   project_id uuid references sya_projects(id) on delete cascade,
+  event_id uuid references sya_events(id) on delete cascade,   -- an assignment for one event
   done boolean not null default false,
   done_at timestamptz,
   done_by text,
@@ -77,6 +84,52 @@ create table if not exists sya_tasks (
   updated_at timestamptz default now(),
   updated_by text
 );
+
+-- Plan lines for one event or one project.
+--   agenda: a schedule row (day, times, where, who leads, AV, set-up in notes, notes for seniors and chaperones).
+--           section = who the block is for ('' = everyone, or Seniors / Chaperones / Adult leaders);
+--           detail = its parts, one per line (conducting, prayers, stations, games)
+--   list:   food, set-up, and things to bring (section, qty, who has it, done)
+--   budget: planned and spent amounts; section = 'approved' is the approved total. Adult PIN only.
+create table if not exists sya_plan (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('agenda','list','budget')),
+  project_id uuid references sya_projects(id) on delete cascade,
+  event_id uuid references sya_events(id) on delete cascade,
+  title text not null,
+  section text default '',
+  day date,
+  start_time time,
+  end_time time,
+  location text default '',
+  who text default '',
+  qty text default '',
+  planned numeric(10,2),
+  actual numeric(10,2),
+  done boolean not null default false,
+  notes text default '',
+  detail text default '',
+  av text default '',
+  senior_notes text default '',
+  chaperone_notes text default '',
+  high_level boolean not null default false,
+  sort int not null default 0,
+  created_at timestamptz default now(),
+  created_by text,
+  updated_at timestamptz default now(),
+  updated_by text,
+  check (project_id is not null or event_id is not null)
+);
+create index if not exists sya_plan_event on sya_plan (event_id);
+create index if not exists sya_plan_project on sya_plan (project_id);
+
+-- Columns added after the first release (no-ops on a new database).
+alter table sya_events add column if not exists info_only boolean not null default false;
+alter table sya_events add column if not exists recap text default '';
+alter table sya_events add column if not exists youth_count int;
+alter table sya_events add column if not exists adult_count int;
+alter table sya_tasks add column if not exists event_id uuid references sya_events(id) on delete cascade;
+alter table sya_plan add column if not exists detail text default '';
 
 -- PIN hashes and failed attempts. Never readable from the app.
 create table if not exists sya_auth (
@@ -94,9 +147,10 @@ alter table sya_people enable row level security;
 alter table sya_projects enable row level security;
 alter table sya_events enable row level security;
 alter table sya_tasks enable row level security;
+alter table sya_plan enable row level security;
 alter table sya_auth enable row level security;
 alter table sya_pin_attempts enable row level security;
-revoke all on sya_settings, sya_people, sya_projects, sya_events, sya_tasks, sya_auth, sya_pin_attempts from anon, authenticated;
+revoke all on sya_settings, sya_people, sya_projects, sya_events, sya_tasks, sya_plan, sya_auth, sya_pin_attempts from anon, authenticated;
 
 -- ---------- PIN check ----------
 create or replace function sya_check_pin(p_pin text) returns text
@@ -131,11 +185,15 @@ begin
     'people', coalesce((select json_agg(to_json(p) order by name) from sya_people p), '[]'::json),
     'projects', coalesce((select json_agg(to_json(p) order by event_date nulls last) from sya_projects p), '[]'::json),
     'events', coalesce((select json_agg(to_json(e) order by start_date, start_time) from sya_events e), '[]'::json),
-    'tasks', coalesce((select json_agg(to_json(t) order by due_date nulls last) from sya_tasks t), '[]'::json)
+    'tasks', coalesce((select json_agg(to_json(t) order by due_date nulls last) from sya_tasks t), '[]'::json),
+    -- budget lines go to adult leaders only
+    'plan', coalesce((select json_agg(to_json(x) order by day nulls first, start_time nulls first, sort, title) from sya_plan x
+                      where v_role = 'adult' or kind <> 'budget'), '[]'::json)
   );
 end $$;
 
--- ---------- save one row (adult only). p_kind: person | project | event | task | setting ----------
+-- ---------- save one row (adult only). p_kind: person | project | event | task | plan | setting ----------
+-- Newer fields keep their value when an older copy of the app saves a row without them.
 create or replace function sya_save(p_pin text, p_actor text, p_kind text, p_row jsonb) returns json
 language plpgsql security definer set search_path = public, extensions as $$
 declare
@@ -166,23 +224,46 @@ begin
       updated_at = now(), updated_by = p_actor;
     select to_json(t) into v_out from sya_projects t where id = v_id;
   elsif p_kind = 'event' then
-    insert into sya_events as t (id, title, category, audience, start_date, end_date, start_time, end_time, location, description, project_id, adults, created_by, updated_by)
+    insert into sya_events as t (id, title, category, audience, start_date, end_date, start_time, end_time, location, description, project_id, adults,
+                                 info_only, recap, youth_count, adult_count, created_by, updated_by)
     values (v_id, p_row->>'title', coalesce(p_row->>'category',''), coalesce(p_row->>'audience',''), (p_row->>'start_date')::date,
             (p_row->>'end_date')::date, nullif(p_row->>'start_time','')::time, nullif(p_row->>'end_time','')::time,
             coalesce(p_row->>'location',''), coalesce(p_row->>'description',''), (p_row->>'project_id')::uuid,
-            coalesce((select array_agg(x::uuid) from jsonb_array_elements_text(coalesce(p_row->'adults','[]'::jsonb)) x), '{}'), p_actor, p_actor)
+            coalesce((select array_agg(x::uuid) from jsonb_array_elements_text(coalesce(p_row->'adults','[]'::jsonb)) x), '{}'),
+            coalesce((p_row->>'info_only')::boolean, false), coalesce(p_row->>'recap',''), (p_row->>'youth_count')::int, (p_row->>'adult_count')::int,
+            p_actor, p_actor)
     on conflict (id) do update set title = excluded.title, category = excluded.category, audience = excluded.audience,
       start_date = excluded.start_date, end_date = excluded.end_date, start_time = excluded.start_time, end_time = excluded.end_time,
       location = excluded.location, description = excluded.description, project_id = excluded.project_id, adults = excluded.adults,
+      info_only = case when p_row ? 'info_only' then excluded.info_only else t.info_only end,
+      recap = case when p_row ? 'recap' then excluded.recap else t.recap end,
+      youth_count = case when p_row ? 'youth_count' then excluded.youth_count else t.youth_count end,
+      adult_count = case when p_row ? 'adult_count' then excluded.adult_count else t.adult_count end,
       updated_at = now(), updated_by = p_actor;
     select to_json(t) into v_out from sya_events t where id = v_id;
   elsif p_kind = 'task' then
-    insert into sya_tasks as t (id, title, area, notes, due_date, owner_id, project_id, done, created_by, updated_by)
+    insert into sya_tasks as t (id, title, area, notes, due_date, owner_id, project_id, event_id, done, created_by, updated_by)
     values (v_id, p_row->>'title', coalesce(p_row->>'area',''), coalesce(p_row->>'notes',''), (p_row->>'due_date')::date,
-            (p_row->>'owner_id')::uuid, (p_row->>'project_id')::uuid, coalesce((p_row->>'done')::boolean, false), p_actor, p_actor)
+            (p_row->>'owner_id')::uuid, (p_row->>'project_id')::uuid, (p_row->>'event_id')::uuid, coalesce((p_row->>'done')::boolean, false), p_actor, p_actor)
     on conflict (id) do update set title = excluded.title, area = excluded.area, notes = excluded.notes, due_date = excluded.due_date,
-      owner_id = excluded.owner_id, project_id = excluded.project_id, updated_at = now(), updated_by = p_actor;
+      owner_id = excluded.owner_id, project_id = excluded.project_id,
+      event_id = case when p_row ? 'event_id' then excluded.event_id else t.event_id end,
+      updated_at = now(), updated_by = p_actor;
     select to_json(t) into v_out from sya_tasks t where id = v_id;
+  elsif p_kind = 'plan' then
+    insert into sya_plan as t (id, kind, project_id, event_id, title, section, day, start_time, end_time, location, who, qty, planned, actual, done,
+                               notes, detail, av, senior_notes, chaperone_notes, high_level, sort, created_by, updated_by)
+    values (v_id, p_row->>'kind', (p_row->>'project_id')::uuid, (p_row->>'event_id')::uuid, p_row->>'title', coalesce(p_row->>'section',''),
+            (p_row->>'day')::date, nullif(p_row->>'start_time','')::time, nullif(p_row->>'end_time','')::time, coalesce(p_row->>'location',''),
+            coalesce(p_row->>'who',''), coalesce(p_row->>'qty',''), (p_row->>'planned')::numeric, (p_row->>'actual')::numeric,
+            coalesce((p_row->>'done')::boolean, false), coalesce(p_row->>'notes',''), coalesce(p_row->>'detail',''), coalesce(p_row->>'av',''), coalesce(p_row->>'senior_notes',''),
+            coalesce(p_row->>'chaperone_notes',''), coalesce((p_row->>'high_level')::boolean, false), coalesce((p_row->>'sort')::int, 0), p_actor, p_actor)
+    on conflict (id) do update set kind = excluded.kind, project_id = excluded.project_id, event_id = excluded.event_id, title = excluded.title,
+      section = excluded.section, day = excluded.day, start_time = excluded.start_time, end_time = excluded.end_time, location = excluded.location,
+      who = excluded.who, qty = excluded.qty, planned = excluded.planned, actual = excluded.actual, done = excluded.done, notes = excluded.notes,
+      detail = excluded.detail, av = excluded.av, senior_notes = excluded.senior_notes, chaperone_notes = excluded.chaperone_notes, high_level = excluded.high_level,
+      sort = excluded.sort, updated_at = now(), updated_by = p_actor;
+    select to_json(t) into v_out from sya_plan t where id = v_id;
   else
     raise exception 'Unknown kind %', p_kind;
   end if;
@@ -197,9 +278,10 @@ begin
   if p_kind = 'person' then
     update sya_events set adults = array_remove(adults, p_id) where p_id = any(adults);
     delete from sya_people where id = p_id;
-  elsif p_kind = 'project' then delete from sya_projects where id = p_id;   -- tasks cascade, events unlink
-  elsif p_kind = 'event' then delete from sya_events where id = p_id;
+  elsif p_kind = 'project' then delete from sya_projects where id = p_id;   -- tasks and plan lines cascade, events unlink
+  elsif p_kind = 'event' then delete from sya_events where id = p_id;       -- its plan lines and assignments cascade
   elsif p_kind = 'task' then delete from sya_tasks where id = p_id;
+  elsif p_kind = 'plan' then delete from sya_plan where id = p_id;
   else raise exception 'Unknown kind %', p_kind;
   end if;
   return json_build_object('ok', true);

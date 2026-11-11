@@ -4,8 +4,12 @@
    when config.js has keys; otherwise a demo that saves to this device only. */
 
 const CFG = window.SYA_CONFIG || {};
-const LIVE = !!(CFG.supabaseUrl && CFG.supabaseAnonKey);
-const KEY = { person: 'people', event: 'events', project: 'projects', task: 'tasks' };
+const DEMO = new URLSearchParams(location.search).has('demo');   // add ?demo to the address to try things without touching live data
+const LIVE = !!(CFG.supabaseUrl && CFG.supabaseAnonKey) && !DEMO;
+const KEY = { person: 'people', event: 'events', project: 'projects', task: 'tasks', plan: 'plan' };
+// Demo mode keeps its own sign-in so trying it never signs this device out of the live app.
+const PIN_KEY = DEMO ? 'sya_demo_pin' : 'sya_pin';
+const ME_KEY = DEMO ? 'sya_demo_me' : 'sya_me';
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -23,12 +27,24 @@ const fmtTime = t => {
   const [h, m] = t.split(':').map(Number);
   return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 };
+// "10:00–10:20 AM" when both ends share AM/PM, so schedule rows stay on one line.
+const fmtRange = (a, b) => {
+  if (!a) return '';
+  if (!b) return fmtTime(a);
+  const A = fmtTime(a), B = fmtTime(b);
+  return (A.slice(-2) === B.slice(-2) ? A.slice(0, -3) : A) + '–' + B;
+};
 const firstName = n => String(n || '').split(/\s+/)[0];
 const initials = n => String(n || '?').split(/\s+/).filter(w => /^[A-Za-z]/.test(w)).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
 const byName = (a, b) => a.name.localeCompare(b.name);
 const byDue = (a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || a.title.localeCompare(b.title);
 const byEventDate = (a, b) => a.start_date.localeCompare(b.start_date) || (a.start_time || '').localeCompare(b.start_time || '');
 const byProjectDate = (a, b) => (a.event_date || '9999').localeCompare(b.event_date || '9999');
+const byAgenda = (a, b) => (a.day || '').localeCompare(b.day || '') || (a.start_time || '').localeCompare(b.start_time || '') || (a.sort || 0) - (b.sort || 0) || a.title.localeCompare(b.title);
+const num = v => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
+const money = n => (n == null || isNaN(n) ? '' : (n < 0 ? '-$' : '$') + Math.abs(Number(n)).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+const sum = (list, k) => list.reduce((t, x) => t + (Number(x[k]) || 0), 0);
+const monthLabel = m => fmtDate(m + '-01', { month: 'long', year: 'numeric' });
 
 const store = {
   get(k) { try { return localStorage.getItem(k) ?? sessionStorage.getItem(k); } catch { return null; } },
@@ -46,6 +62,21 @@ const ROLES = [
   'Stake Young Women President', 'Stake Young Women Counselor', 'Stake Young Women Secretary', 'Bishopric', 'Ward Young Women President',
   'Young Men Adviser', 'Young Women Adviser', 'Specialist',
   'Priests quorum assistant', 'Teachers quorum president', 'Deacons quorum president', 'Young Women class president', 'Stake youth committee',
+];
+
+// Plan lines hang off an event or a project. kind: agenda (schedule), list (food, set-up, to bring), budget.
+const LIST_SECTIONS = ['Program', 'Food', 'Set up', 'To bring', 'Communication', 'Safety'];
+const WHO_GROUPS = ['YM presidency', 'YW presidency', 'Co-chairs', 'Seniors', 'Chaperones'];
+const AGENDA_MODES = { full: 'Full', seniors: 'Seniors', chaperones: 'Chaperones', high: 'High level' };
+const AGENDA_FOR = ['Seniors', 'Chaperones', 'Adult leaders'];   // blank = everyone
+const CAL_FILTERS = { all: 'All', seniors: 'Seniors', syc: 'SYC', leaders: 'Leader meetings', needs: 'Needs attention' };
+// Starter checklist for a senior activity. Every line can be edited or removed.
+const EVENT_STARTER = [
+  ['Program', 'Conducting'], ['Program', 'Opening prayer'], ['Program', 'Spiritual thought'],
+  ['Food', 'Main dish'], ['Food', 'Sides and dessert'], ['Food', 'Drinks and ice'], ['Food', 'Paper products'],
+  ['Set up', 'Tables and chairs'], ['Set up', 'Activity supplies'],
+  ['Communication', 'Invite the seniors and collect RSVPs'], ['Communication', 'Ask seminary teachers to announce it'],
+  ['Safety', 'Permission slips if it is off-site or overnight'],
 ];
 
 // Planning checklist for a project. Days are relative to the project's event date; every task can be edited or removed.
@@ -126,10 +157,11 @@ const api = LIVE ? {
 } : demoApi();
 
 function demoApi() {
-  const K = 'sya_demo_v1';
+  const K = 'sya_demo_v2';
   let db = null;
   try { db = JSON.parse(localStorage.getItem(K)); } catch { /* ignore */ }
   if (!db) db = demoSeed();
+  if (!db.plan) db.plan = [];
   const persist = () => { try { localStorage.setItem(K, JSON.stringify(db)); } catch { /* ignore */ } };
   persist();
   const clone = x => JSON.parse(JSON.stringify(x));
@@ -142,7 +174,9 @@ function demoApi() {
   return {
     async load(pin) {
       const role = need(pin);
-      return { role, ...clone(db) };
+      const d = clone(db);
+      if (role !== 'adult') d.plan = d.plan.filter(x => x.kind !== 'budget');   // budget is for adult leaders
+      return { role, ...d };
     },
     async save(pin, actor, kind, row) {
       need(pin, true);
@@ -162,6 +196,11 @@ function demoApi() {
       if (kind === 'project') {
         db.tasks = db.tasks.filter(t => t.project_id !== id);
         db.events.forEach(e => { if (e.project_id === id) e.project_id = null; });
+        db.plan = db.plan.filter(x => x.project_id !== id);
+      }
+      if (kind === 'event') {
+        db.tasks = db.tasks.filter(t => t.event_id !== id);
+        db.plan = db.plan.filter(x => x.event_id !== id);
       }
       if (kind === 'person') {
         db.tasks.forEach(t => { if (t.owner_id === id) t.owner_id = null; });
@@ -205,21 +244,53 @@ function demoSeed() {
   tasks.push({ id: uid(), title: 'Confirm the devotional speaker (sample)', owner_id: pres.id, due_date: addDays(t, 4), area: '', project_id: null, notes: '', done: false });
   const ev = (title, category, start_date, extra) => ({
     id: uid(), title, category, start_date, end_date: null, start_time: '', end_time: '', location: '', audience: 'All youth',
-    description: '', project_id: null, adults: [], ...extra,
+    description: '', project_id: null, adults: [], info_only: false, recap: '', youth_count: null, adult_count: null, ...extra,
   });
   const events = [
     ev('Stake Youth Conference (sample)', 'Youth conference', yc.event_date, { end_date: addDays(yc.event_date, 2), location: '[FILL IN]', project_id: yc.id, adults: [pres.id, yw.id] }),
     ev('Stake youth leadership committee (sample)', 'Leadership meeting', addDays(t, 5), { start_time: '19:00', end_time: '20:00', location: 'Stake center', audience: 'Youth and leaders', adults: [pres.id, sec.id] }),
     ev('Stake youth devotional (sample)', 'Devotional', addDays(t, 20), { start_time: '19:00', end_time: '20:00', location: 'Stake center', adults: [pres.id] }),
   ];
+  const act = ev('Senior activity (sample)', 'Stake activity', addDays(t, 12), { start_time: '10:00', end_time: '12:00', audience: 'Seniors', adults: [yw.id] });
+  const last = ev('Senior cabin trip (sample)', 'Stake activity', addDays(t, -20), { end_date: addDays(t, -19), audience: 'Seniors', location: '[FILL IN]', adults: [pres.id, yw.id], youth_count: 30, adult_count: 6, recap: 'Sample recap. Write what to keep and what to change next time.' });
+  events.push(act, last, ev('General conference (sample)', 'Other', addDays(t, 30), { end_date: addDays(t, 31), info_only: true }));
+  const L = (kind, o) => ({ id: uid(), kind, project_id: null, event_id: null, title: '', section: '', day: null, start_time: '', end_time: '', location: '', who: '', qty: '',
+    planned: null, actual: null, done: false, notes: '', detail: '', av: '', senior_notes: '', chaperone_notes: '', high_level: false, sort: 0, ...o });
+  const d1 = yc.event_date, d2 = addDays(yc.event_date, 1);
+  const plan = [
+    L('agenda', { event_id: act.id, day: act.start_date, start_time: '10:00', end_time: '10:20', title: 'Welcome, prayer, spiritual thought', who: 'Co-chairs' }),
+    L('agenda', { event_id: act.id, day: act.start_date, start_time: '10:20', end_time: '11:15', title: 'Activity' }),
+    L('agenda', { event_id: act.id, day: act.start_date, start_time: '11:15', end_time: '12:00', title: 'Lunch and clean up' }),
+    L('list', { event_id: act.id, section: 'Food', title: 'Main dish', who: 'YW presidency' }),
+    L('list', { event_id: act.id, section: 'Food', title: 'Drinks and ice', who: 'YM presidency', done: true }),
+    L('list', { event_id: act.id, section: 'Set up', title: 'Tables and chairs', qty: '6 tables', who: 'YM presidency' }),
+    L('budget', { event_id: act.id, title: 'Food (sample)', planned: 150, actual: 40 }),
+    L('agenda', { event_id: last.id, day: last.start_date, start_time: '18:30', end_time: '19:00', title: 'Dinner' }),
+    L('list', { event_id: last.id, section: 'Food', title: 'Breakfast', who: 'YM presidency', done: true }),
+    L('agenda', { project_id: yc.id, day: d1, title: 'Day theme goes here (sample)', high_level: true }),
+    L('agenda', { project_id: yc.id, day: d1, start_time: '12:45', end_time: '13:00', title: 'Youth arrive and check in', location: 'Gym', high_level: true, senior_notes: 'Wear your group color.', chaperone_notes: 'Welcome the youth in your group.' }),
+    L('agenda', { project_id: yc.id, day: d1, start_time: '12:15', end_time: '12:45', title: 'Senior meeting', location: 'Band room', section: 'Seniors', detail: 'Conducting:\nOpening prayer:\nPreview the day' }),
+    L('agenda', { project_id: yc.id, day: d1, start_time: '13:00', end_time: '14:00', title: 'Opening meeting', location: 'Main hall', who: 'Co-chairs', av: 'Microphone, slides', notes: 'Set up 200 chairs', high_level: true,
+      detail: 'Conducting:\nTheme song\nOpening prayer:\nWelcome and theme:\nClosing prayer:' }),
+    L('agenda', { project_id: yc.id, day: d1, start_time: '14:00', end_time: '15:00', title: 'Group games', location: 'Field', senior_notes: 'Seniors lead the games.' }),
+    L('agenda', { project_id: yc.id, day: d2, start_time: '08:30', end_time: '09:00', title: 'All-youth meeting', location: 'Main hall', high_level: true }),
+    L('budget', { project_id: yc.id, section: 'approved', title: 'Approved budget', planned: 1000 }),
+    L('budget', { project_id: yc.id, title: 'Food (sample)', planned: 600, actual: 120 }),
+    L('budget', { project_id: yc.id, title: 'T-shirts (sample)', planned: 250 }),
+  ];
+  tasks.push({ id: uid(), title: 'Buy food for the senior activity (sample)', owner_id: yw.id, due_date: addDays(t, 10), area: '', project_id: null, event_id: act.id, notes: '', done: false });
   return {
     settings: { stake_name: 'Demo Stake', wards: 'Ward 1\nWard 2\nWard 3' },
-    people: [pres, sec, yw, bish, y1, y2], projects: [yc], events, tasks,
+    people: [pres, sec, yw, bish, y1, y2], projects: [yc], events, tasks, plan,
   };
 }
 
 /* ---------- state ---------- */
-const S = { pin: null, role: null, me: null, data: null, view: 'home', sub: null, filter: 'mine', month: null, day: null, kind: 'adult', err: '', loadedAt: 0 };
+const S = {
+  pin: null, role: null, me: null, data: null, view: 'home', sub: null, back: null, filter: 'mine', month: null, day: null, kind: 'adult', err: '', loadedAt: 0,
+  calFilter: 'all', calMode: 'month', calPast: false,            // calendar
+  ptab: 'overview', pfilter: 'all', open: new Set(), amode: 'full',   // project page
+};
 const isAdult = () => S.role === 'adult';
 const byId = (list, id) => (id ? S.data[list].find(x => x.id === id) : null);
 const personName = id => (byId('people', id) || {}).name || '';
@@ -229,8 +300,29 @@ const isMine = x => {
   return personName(x.owner_id).toLowerCase() === S.me.name.toLowerCase();
 };
 const canToggle = x => isAdult() || isMine(x);
-const eventsOn = d => S.data.events.filter(e => e.start_date <= d && (e.end_date || e.start_date) >= d).sort(byEventDate);
+const eventsOn = (d, list = S.data.events) => list.filter(e => e.start_date <= d && (e.end_date || e.start_date) >= d).sort(byEventDate);
 const youthEvent = e => e.audience !== 'Adult leaders';
+const upcoming = e => (e.end_date || e.start_date) >= today();
+const isSyc = e => e.category === 'Youth conference' || (byId('projects', e.project_id) || {}).kind === 'Youth conference';
+const planFor = (kind, scope) => S.data.plan.filter(x => x.kind === kind && (scope.project ? x.project_id === scope.project : x.event_id === scope.event));
+const eventTasks = id => S.data.tasks.filter(x => x.event_id === id);
+// What an event still needs before it is ready. Calendar notes (info_only) need nothing.
+function needs(e) {
+  if (e.info_only) return [];
+  const n = [];
+  if (!e.location) n.push('a location');
+  if (!e.start_time && !e.end_date) n.push('a time');
+  if (youthEvent(e) && e.adults.length < 2) n.push(e.adults.length ? '1 more adult leader' : '2 adult leaders');
+  return n;
+}
+function calEvents() {
+  const f = S.calFilter;
+  return S.data.events.filter(e => f === 'seniors' ? e.audience === 'Seniors'
+    : f === 'syc' ? isSyc(e)
+    : f === 'leaders' ? e.audience === 'Adult leaders' || e.category === 'Leadership meeting'
+    : f === 'needs' ? upcoming(e) && needs(e).length > 0
+    : true);
+}
 const catKey = c => String(c || 'other').toLowerCase().replace(/[^a-z]+/g, '-');
 
 function normalize(d) {
@@ -241,10 +333,16 @@ function normalize(d) {
     projects: d.projects || [],
     tasks: d.tasks || [],
     events: (d.events || []).map(e => ({ ...e, adults: e.adults || [], start_time: t5(e.start_time), end_time: t5(e.end_time) })),
+    plan: (d.plan || []).map(x => ({ ...x, start_time: t5(x.start_time), end_time: t5(x.end_time), planned: num(x.planned), actual: num(x.actual) })),
   };
 }
 
 /* ---------- small pieces ---------- */
+const rich = t => esc(t).replace(/https?:\/\/[^\s<]+/g, u => {
+  let host = 'link';
+  try { host = new URL(u.replace(/&amp;/g, '&')).hostname.replace(/^www\./, ''); } catch { /* keep "link" */ }
+  return `<a href="${u}" target="_blank" rel="noopener">${host} ↗</a>`;
+});
 const empty = msg => `<p class="empty">${esc(msg)}</p>`;
 const pill = (text, cls = '') => `<span class="pill ${cls}">${esc(text)}</span>`;
 
@@ -277,7 +375,8 @@ function countdown(date) {
 function taskRow(x, showProject = true) {
   const owner = personName(x.owner_id);
   const proj = showProject && x.project_id ? byId('projects', x.project_id) : null;
-  const meta = [owner ? esc(owner) : '<span class="muted">Unassigned</span>', proj ? esc(proj.title) : ''].filter(Boolean).join(' · ');
+  const ev = showProject && x.event_id ? byId('events', x.event_id) : null;
+  const meta = [owner ? esc(owner) : '<span class="muted">Unassigned</span>', proj ? esc(proj.title) : '', ev ? esc(`${ev.title} (${fmtDate(ev.start_date)})`) : ''].filter(Boolean).join(' · ');
   return `<div class="task ${x.done ? 'done' : ''}">
     <button class="check" data-act="toggle" data-id="${x.id}" ${canToggle(x) ? '' : 'disabled'} aria-label="${x.done ? 'Mark not done' : 'Mark done'}">${x.done ? '✓' : ''}</button>
     <button class="task-main" data-act="task" data-id="${x.id}">
@@ -289,9 +388,13 @@ function taskRow(x, showProject = true) {
 
 function eventRow(e) {
   const d = parse(e.start_date);
+  const soon = upcoming(e) && (e.start_date <= addDays(today(), 45) || (S.view === 'calendar' && S.calFilter === 'needs'));
+  const n = isAdult() && soon ? needs(e) : [];
+  const started = S.data.plan.some(x => x.event_id === e.id) || S.data.tasks.some(x => x.event_id === e.id);
   return `<button class="row-item" data-act="event" data-id="${e.id}">
     <span class="datebox cat-${catKey(e.category)}"><span>${d.toLocaleDateString(undefined, { month: 'short' })}</span><b>${d.getDate()}</b></span>
-    <span class="grow"><span class="ttl">${esc(e.title)}</span><span class="meta">${whenText(e)}${e.location ? ' · ' + esc(e.location) : ''}</span></span>
+    <span class="grow"><span class="ttl">${esc(e.title)}</span><span class="meta">${whenText(e)}${e.location ? ' · ' + esc(e.location) : ''}${started ? ' · plan started' : ''}</span>
+      ${n.length ? `<span class="needs">Needs ${esc(n.join(', '))}</span>` : ''}</span>
     ${e.category ? pill(e.category, 'cat cat-' + catKey(e.category)) : ''}
   </button>`;
 }
@@ -329,6 +432,7 @@ function vPin() {
     </form>
     <p class="err">${esc(S.err)}</p>
     ${LIVE ? '' : '<p class="hint">Demo mode: saves to this device only. Adult PIN <b>1111</b>, youth PIN <b>2222</b>.</p>'}
+    ${DEMO && CFG.supabaseUrl ? '<p class="hint"><a href="./">Leave demo mode</a></p>' : ''}
   </div></div>`;
 }
 
@@ -358,20 +462,20 @@ function header() {
 }
 
 function nav() {
-  const tab = { project: 'projects', people: 'more', resources: 'more', settings: 'more' }[S.view] || S.view;
+  const tab = { project: 'projects', event: 'calendar', people: 'more', resources: 'more', settings: 'more' }[S.view] || S.view;
   const items = [['home', 'Home'], ['calendar', 'Calendar'], ['tasks', 'Assignments'], ['projects', 'Projects'], ['more', 'More']];
   return `<nav class="tabs">${items.map(([v, label]) =>
     `<button class="${tab === v ? 'on' : ''}" data-act="go" data-view="${v}">${ICON[v]}<span>${label}</span></button>`).join('')}</nav>`;
 }
 
-function alerts() {
+function attention() {
   const t = today();
-  const out = [];
-  S.data.events
-    .filter(e => e.start_date >= t && e.start_date <= addDays(t, 60) && youthEvent(e) && e.adults.length < 2)
-    .sort(byEventDate)
-    .forEach(e => out.push(`<button class="alert" data-act="event" data-id="${e.id}">${ICON.alert}<span><b>${esc(e.title)}</b> has ${e.adults.length ? 'only 1 adult leader' : 'no adult leaders'} listed (need at least 2)</span></button>`));
-  return out.length ? `<div class="alerts">${out.join('')}</div>` : '';
+  const list = S.data.events.filter(e => e.start_date >= t && e.start_date <= addDays(t, 45) && needs(e).length).sort(byEventDate);
+  if (!list.length) return '';
+  return `<section class="card attn"><div class="card-h"><h3>Needs attention</h3>
+      ${list.length > 4 ? `<button class="link" data-act="cal-filter" data-f="needs" data-mode="list">See all ${list.length}</button>` : ''}</div>
+    <p class="meta">Events in the next 45 days that still need a location, a time, or two adult leaders (General Handbook 10.8.1).</p>
+    ${list.slice(0, 4).map(eventRow).join('')}</section>`;
 }
 
 function vHome() {
@@ -382,7 +486,7 @@ function vHome() {
   const upcoming = S.data.events.filter(e => (e.end_date || e.start_date) >= t).sort(byEventDate).slice(0, 5);
   const projects = S.data.projects.filter(p => p.status !== 'done' && p.status !== 'cancelled').sort(byProjectDate);
   return `<h2 class="hello">Hi, ${esc(firstName(S.me.name))}</h2>
-    ${isAdult() ? alerts() : ''}
+    ${isAdult() ? attention() : ''}
     <div class="cols">
       <section class="card"><div class="card-h"><h3>My assignments</h3><button class="link" data-act="go" data-view="tasks">See all</button></div>
         ${overdue.length ? `<div class="group-label danger">Overdue</div>${overdue.map(x => taskRow(x)).join('')}` : ''}
@@ -399,6 +503,17 @@ function vHome() {
 }
 
 function vCalendar() {
+  const evs = calEvents();
+  const chips = Object.entries(CAL_FILTERS).filter(([k]) => k !== 'needs' || isAdult())
+    .map(([k, l]) => `<button class="chip ${S.calFilter === k ? 'on' : ''}" data-act="cal-filter" data-f="${k}">${l}</button>`).join('');
+  return `<div class="page-h"><h2>Calendar</h2><span class="page-tools no-print">
+      <span class="toggle">${[['month', 'Month'], ['list', 'List']].map(([k, l]) => `<button class="${S.calMode === k ? 'on' : ''}" data-act="cal-mode" data-m="${k}">${l}</button>`).join('')}</span>
+      ${isAdult() ? '<button class="btn primary" data-act="new-event">+ Event</button>' : ''}</span></div>
+    <div class="chips no-print">${chips}</div>
+    ${S.calMode === 'list' ? calList(evs) : calMonth(evs)}`;
+}
+
+function calMonth(evs) {
   const m = S.month || today().slice(0, 7);
   const [y, mo] = m.split('-').map(Number);
   const first = new Date(y, mo - 1, 1);
@@ -407,17 +522,16 @@ function vCalendar() {
   for (let i = 0; i < first.getDay(); i++) cells.push('<span class="cal-cell blank"></span>');
   for (let d = 1; d <= days; d++) {
     const ds = `${m}-${pad(d)}`;
-    const evs = eventsOn(ds);
-    cells.push(`<button class="cal-cell ${ds === today() ? 'today' : ''} ${ds === S.day ? 'sel' : ''}" data-act="day" data-day="${ds}" aria-label="${fmtDate(ds, { month: 'long', day: 'numeric' })}, ${evs.length} events">
+    const on = eventsOn(ds, evs);
+    cells.push(`<button class="cal-cell ${ds === today() ? 'today' : ''} ${ds === S.day ? 'sel' : ''}" data-act="day" data-day="${ds}" aria-label="${fmtDate(ds, { month: 'long', day: 'numeric' })}, ${on.length} events">
       <span class="dn">${d}</span>
-      ${evs.slice(0, 2).map(e => `<span class="cal-ev cat-${catKey(e.category)}">${esc(e.title)}</span>`).join('')}
-      ${evs.length > 2 ? `<span class="cal-more">+${evs.length - 2}</span>` : ''}
+      ${on.slice(0, 2).map(e => `<span class="cal-ev cat-${catKey(e.category)}">${esc(e.title)}</span>`).join('')}
+      ${on.length > 2 ? `<span class="cal-more">+${on.length - 2}</span>` : ''}
     </button>`);
   }
-  const list = S.day ? eventsOn(S.day)
-    : S.data.events.filter(e => e.start_date <= `${m}-31` && (e.end_date || e.start_date) >= `${m}-01`).sort(byEventDate);
-  return `<div class="page-h"><h2>Calendar</h2>${isAdult() ? '<button class="btn primary" data-act="new-event">+ Event</button>' : ''}</div>
-    <section class="card cal">
+  const list = S.day ? eventsOn(S.day, evs)
+    : evs.filter(e => e.start_date <= `${m}-31` && (e.end_date || e.start_date) >= `${m}-01`).sort(byEventDate);
+  return `<section class="card cal">
       <div class="cal-h">
         <button class="icon-btn" data-act="month" data-d="-1" aria-label="Previous month">‹</button>
         <b>${first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</b>
@@ -431,6 +545,20 @@ function vCalendar() {
       ${S.day ? `<span>${isAdult() ? '<button class="link" data-act="new-event">+ Add</button> · ' : ''}<button class="link" data-act="day" data-day="">Whole month</button></span>` : ''}</div>
       ${list.length ? list.map(eventRow).join('') : empty('No events.')}
     </section>`;
+}
+
+// The whole calendar as a list by month: the same shape as the printed senior calendar.
+function calList(evs) {
+  const list = evs.filter(e => S.calPast || upcoming(e)).sort(byEventDate);
+  const hidden = evs.length - list.length;
+  const months = [...new Set(list.map(e => e.start_date.slice(0, 7)))];
+  return `<h2 class="print-only">${esc(S.data.settings.stake_name || 'Stake')} youth calendar${S.calFilter === 'all' ? '' : ' · ' + CAL_FILTERS[S.calFilter]}</h2>
+    <div class="btn-row tools no-print"><button class="btn" data-act="print">Print</button><button class="btn" data-act="ics-all">Add all to my calendar</button>
+      ${hidden || S.calPast ? `<button class="btn ghost" data-act="cal-past">${S.calPast ? 'Hide past events' : `Show ${hidden} past`}</button>` : ''}</div>
+    ${months.map(m => {
+      const rows = list.filter(e => e.start_date.slice(0, 7) === m);
+      return `<section class="card"><div class="card-h"><h3>${monthLabel(m)}</h3><span class="meta">${rows.length} event${rows.length > 1 ? 's' : ''}</span></div>${rows.map(eventRow).join('')}</section>`;
+    }).join('') || `<section class="card">${empty(S.calFilter === 'needs' ? 'Every upcoming event has what it needs.' : 'No events.')}</section>`}`;
 }
 
 function vTasks() {
@@ -466,28 +594,49 @@ function vProjects() {
     ${past.length ? `<h3 class="section-label">Finished</h3><div class="proj-grid">${past.map(projectCard).join('')}</div>` : ''}`;
 }
 
+const TASK_FILTERS = {
+  all: ['All', () => true],
+  mine: ['Mine', x => !x.done && isMine(x)],
+  unassigned: ['Unassigned', x => !x.done && !x.owner_id],
+  undated: ['No due date', x => !x.done && !x.due_date],
+  overdue: ['Overdue', x => !x.done && x.due_date && x.due_date < today()],
+};
+const areaOf = x => x.area || 'General';
+
 function vProject() {
   const p = byId('projects', S.sub);
   if (!p) { S.view = 'projects'; return vProjects(); }
   const tasks = S.data.tasks.filter(x => x.project_id === p.id);
-  const g = progress(p);
-  const groups = new Map();
-  tasks.forEach(x => { const a = x.area || 'General'; if (!groups.has(a)) groups.set(a, []); groups.get(a).push(x); });
-  const rank = a => { const i = AREA_ORDER.indexOf(a); return i < 0 ? (a === 'General' ? -1 : 99) : i; };
-  const areas = [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));
   const evs = S.data.events.filter(e => e.project_id === p.id).sort(byEventDate);
-  return `<button class="back" data-act="go" data-view="projects">‹ Projects</button>
-    <section class="card">
-      <div class="proj-top"><div><div class="eyebrow">${esc(p.kind || 'Project')} · ${STATUSES[p.status] || ''}</div><h2>${esc(p.title)}</h2></div>${countdown(p.event_date)}</div>
-      <dl class="facts">
-        <dt>Event date</dt><dd>${p.event_date ? fmtDate(p.event_date, { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' }) : '<span class="muted">Not set</span>'}</dd>
+  const g = progress(p);
+  const tabs = [['overview', 'Overview'], ['tasks', p.kind === 'Youth conference' ? 'Committees' : 'Tasks'], ['timeline', 'Timeline'], ['agenda', 'Agenda']];
+  if (isAdult()) tabs.push(['budget', 'Budget']);
+  const tab = tabs.some(([k]) => k === S.ptab) ? S.ptab : 'overview';
+  const body = { overview: pOverview, tasks: pTasks, timeline: pTimeline, agenda: pAgenda, budget: pBudget }[tab](p, tasks, evs);
+  return `<button class="back no-print" data-act="go" data-view="projects">‹ Projects</button>
+    <section class="card no-print">
+      <div class="proj-top"><div><div class="eyebrow">${esc(p.kind || 'Project')} · ${STATUSES[p.status] || ''}</div><h2>${esc(p.title)}</h2>
+        <div class="meta">${p.event_date ? fmtDate(p.event_date, { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' }) : 'No date set'}</div></div>${countdown(p.event_date)}</div>
+      <div class="bar big"><i style="width:${g.pct}%"></i></div>
+      <div class="meta">${g.done} of ${g.total} tasks done (${g.pct}%)${g.overdue ? ` · <span class="danger">${g.overdue} overdue</span>` : ''}</div>
+    </section>
+    <div class="ptabs no-print">${tabs.map(([k, l]) => `<button class="${tab === k ? 'on' : ''}" data-act="ptab" data-t="${k}">${l}</button>`).join('')}</div>
+    ${body}`;
+}
+
+function pOverview(p, tasks, evs) {
+  const open = tasks.filter(x => !x.done);
+  const next = open.filter(x => x.due_date).sort(byDue).slice(0, 5);
+  const unassigned = open.filter(x => !x.owner_id).length;
+  const undated = open.filter(x => !x.due_date).length;
+  const ahead = evs.filter(upcoming);
+  return `<section class="card">
+      <dl class="facts flush">
         <dt>Adult lead</dt><dd>${esc(personName(p.adult_lead)) || '<span class="muted">Not set</span>'}</dd>
         <dt>Youth lead</dt><dd>${esc(personName(p.youth_lead)) || '<span class="muted">Not set</span>'}</dd>
         ${p.purpose ? `<dt>Purpose</dt><dd class="pre">${esc(p.purpose)}</dd>` : ''}
         ${p.notes ? `<dt>Notes</dt><dd class="pre">${esc(p.notes)}</dd>` : ''}
       </dl>
-      <div class="bar big"><i style="width:${g.pct}%"></i></div>
-      <div class="meta">${g.done} of ${g.total} tasks done (${g.pct}%)${g.overdue ? ` · <span class="danger">${g.overdue} overdue</span>` : ''}</div>
       ${isAdult() ? `<div class="btn-row">
         <button class="btn primary" data-act="new-task" data-project="${p.id}">+ Task</button>
         <button class="btn" data-act="new-event" data-project="${p.id}">+ Event</button>
@@ -495,10 +644,188 @@ function vProject() {
         <button class="btn ghost" data-act="edit-project" data-id="${p.id}">Edit project</button>
       </div>` : ''}
     </section>
-    ${evs.length ? `<section class="card"><div class="card-h"><h3>Events</h3></div>${evs.map(eventRow).join('')}</section>` : ''}
-    ${areas.map(([a, xs]) => `<section class="card"><div class="card-h"><h3>${esc(a)}</h3><span class="meta">${xs.filter(x => x.done).length}/${xs.length}</span></div>
-      ${xs.sort(byDue).map(x => taskRow(x, false)).join('')}</section>`).join('')}
-    ${tasks.length ? '' : `<section class="card">${empty(isAdult() ? 'No tasks yet. Add your own, or start with the planning checklist.' : 'No tasks yet.')}</section>`}`;
+    ${unassigned || undated ? `<section class="card"><div class="card-h"><h3>To sort out</h3></div><div class="chips flush">
+      ${unassigned ? `<button class="chip" data-act="pfilter" data-f="unassigned">${unassigned} unassigned ›</button>` : ''}
+      ${undated ? `<button class="chip" data-act="pfilter" data-f="undated">${undated} with no due date ›</button>` : ''}</div></section>` : ''}
+    <section class="card"><div class="card-h"><h3>Next deadlines</h3><button class="link" data-act="ptab" data-t="timeline">Timeline</button></div>
+      ${next.length ? next.map(x => taskRow(x, false)).join('') : empty(open.length ? 'No open task has a due date yet.' : 'No open tasks.')}</section>
+    <section class="card"><div class="card-h"><h3>Events on the way</h3></div>
+      ${ahead.length ? ahead.map(eventRow).join('') : empty('No upcoming events are linked to this project.')}</section>`;
+}
+
+function pTasks(p, tasks) {
+  const f = TASK_FILTERS[S.pfilter] ? S.pfilter : 'all';
+  const groups = new Map();
+  tasks.forEach(x => { const a = areaOf(x); if (!groups.has(a)) groups.set(a, []); groups.get(a).push(x); });
+  const rank = a => { const i = AREA_ORDER.indexOf(a); return i < 0 ? (a === 'General' ? -1 : 99) : i; };
+  const areas = [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));
+  const few = areas.length <= 3;
+  const cards = areas.map(([a, xs]) => {
+    const shown = xs.filter(TASK_FILTERS[f][1]);
+    if (f !== 'all' && !shown.length) return '';
+    const open = few || f !== 'all' || S.open.has(a);
+    const done = xs.filter(x => x.done).length;
+    const undated = xs.filter(x => !x.done && !x.due_date).length;
+    return `<section class="card area">
+      <button class="area-h" data-act="area" data-a="${esc(a)}" aria-expanded="${open}">
+        <span class="grow"><span class="ttl">${esc(a)}</span><span class="bar"><i style="width:${Math.round((done / xs.length) * 100)}%"></i></span></span>
+        <span class="meta">${done}/${xs.length}</span>${few || f !== 'all' ? '' : `<span class="chev">${open ? '▾' : '▸'}</span>`}
+      </button>
+      ${open ? shown.sort(byDue).map(x => taskRow(x, false)).join('') + (isAdult() ? `<div class="btn-row">
+        <button class="btn" data-act="new-task" data-project="${p.id}" data-area="${esc(a)}">+ Task</button>
+        ${undated ? `<button class="btn ghost" data-act="bulk-date" data-project="${p.id}" data-area="${esc(a)}">Set a due date for ${undated} undated</button>` : ''}</div>` : '') : ''}
+    </section>`;
+  }).join('');
+  return `<div class="chips">${Object.entries(TASK_FILTERS).map(([k, [l, fn]]) =>
+      `<button class="chip sm ${f === k ? 'on' : ''}" data-act="pfilter" data-f="${k}">${l} <span class="n">${tasks.filter(fn).length}</span></button>`).join('')}</div>
+    ${cards || `<section class="card">${empty(tasks.length ? 'Nothing matches.' : isAdult() ? 'No tasks yet. Add your own, or start with the planning checklist on the Overview tab.' : 'No tasks yet.')}</section>`}
+    ${isAdult() || (!few && f === 'all') ? `<div class="btn-row">
+      ${isAdult() ? `<button class="btn primary" data-act="new-task" data-project="${p.id}">+ Task</button>` : ''}
+      ${!few && f === 'all' ? `<button class="btn" data-act="area-all">${S.open.size ? 'Collapse all' : 'Expand all'}</button>` : ''}</div>` : ''}`;
+}
+
+function pTimeline(p, tasks, evs) {
+  const items = [...tasks.filter(x => x.due_date).map(x => ({ d: x.due_date, html: taskRow(x, false) })), ...evs.map(e => ({ d: e.start_date, html: eventRow(e) }))]
+    .sort((a, b) => a.d.localeCompare(b.d));
+  const undated = tasks.filter(x => !x.done && !x.due_date).length;
+  const months = [...new Set(items.map(i => i.d.slice(0, 7)))];
+  const cur = today().slice(0, 7);
+  return `${undated ? `<p class="muted intro">${undated} open task${undated > 1 ? 's have' : ' has'} no due date yet, so ${undated > 1 ? 'they are' : 'it is'} not on the timeline.
+      <button class="link" data-act="pfilter" data-f="undated">Set dates</button></p>` : ''}
+    ${months.map(m => `<section class="card"><div class="card-h"><h3>${monthLabel(m)}</h3>${m === cur ? pill('This month') : ''}</div>
+      ${items.filter(i => i.d.slice(0, 7) === m).map(i => i.html).join('')}</section>`).join('') || `<section class="card">${empty('Nothing has a date yet.')}</section>`}`;
+}
+
+const AGENDA_HINT = {
+  seniors: 'What the seniors need to know for each part.',
+  chaperones: 'What the chaperones need to know for each part.',
+  high: 'Only the parts marked for the high-level agenda: for the stake presidency, parents, and the website.',
+};
+function pAgenda(p) {
+  const lines = planFor('agenda', { project: p.id }).sort(byAgenda);
+  const mode = AGENDA_MODES[S.amode] ? S.amode : 'full';
+  return `<div class="chips no-print">${Object.entries(AGENDA_MODES).map(([k, l]) => `<button class="chip sm ${mode === k ? 'on' : ''}" data-act="amode" data-m="${k}">${l}</button>`).join('')}</div>
+    <h2 class="print-only">${esc(p.title)}</h2>
+    <section class="card"><div class="card-h"><h3>${mode === 'full' ? 'Full agenda' : mode === 'high' ? 'High-level agenda' : `Agenda for ${AGENDA_MODES[mode].toLowerCase()}`}</h3>
+      <span class="no-print nowrap"><button class="link" data-act="print">Print</button>${isAdult() ? ` · <button class="link" data-act="new-plan" data-kind="agenda" data-project="${p.id}">+ Add</button>` : ''}</span></div>
+      ${AGENDA_HINT[mode] ? `<p class="meta no-print">${AGENDA_HINT[mode]}</p>` : ''}
+      ${agendaBlock(lines, mode, true)}</section>`;
+}
+
+function pBudget(p) {
+  return `<section class="card"><div class="card-h"><h3>Budget</h3><span class="meta">Adult leaders only</span></div>${budgetBlock({ project: p.id })}</section>`;
+}
+
+/* ---------- plan blocks shared by events and projects ---------- */
+function agendaBlock(lines, mode, showDays) {
+  const shown = mode === 'high' ? lines.filter(x => x.high_level)
+    : mode === 'seniors' ? lines.filter(x => !x.section || x.section === 'Seniors')
+    : mode === 'chaperones' ? lines.filter(x => !x.section || x.section === 'Chaperones')
+    : lines;
+  if (!shown.length) return empty(mode === 'high' && lines.length ? 'Nothing is marked for the high-level agenda yet.' : 'No schedule yet.');
+  const days = [...new Set(shown.map(x => x.day || ''))];
+  return days.map(d => `${showDays || days.length > 1 ? `<div class="group-label">${d ? fmtDate(d, { weekday: 'long', month: 'long', day: 'numeric' }) : 'Day not set'}</div>` : ''}
+    ${shown.filter(x => (x.day || '') === d).map(x => agendaRow(x, mode)).join('')}`).join('');
+}
+
+function agendaRow(x, mode) {
+  const time = fmtRange(x.start_time, x.end_time);
+  const meta = [x.location, mode !== 'high' && x.who ? 'Lead: ' + x.who : ''].filter(Boolean).map(esc).join(' · ');
+  const notes = mode === 'full' ? [['AV', x.av], ['Set-up', x.notes], ['Seniors', x.senior_notes], ['Chaperones', x.chaperone_notes]]
+    : mode === 'seniors' ? [['', x.senior_notes]] : mode === 'chaperones' ? [['', x.chaperone_notes]] : [];
+  const parts = mode === 'high' ? [] : String(x.detail || '').split('\n').map(l => l.trim()).filter(Boolean);
+  // A div, not a button: the notes can hold links.
+  return `<div class="ag-row ${x.start_time ? '' : 'ag-note'}" ${isAdult() ? `data-act="plan" data-id="${x.id}" role="button" tabindex="0"` : ''}>
+    <span class="ag-time">${esc(time)}</span>
+    <span class="grow"><span class="ttl">${esc(x.title)}${x.section && mode !== 'high' ? ` <span class="ag-for">${esc(x.section)}</span>` : ''}</span>${meta ? `<span class="meta">${meta}</span>` : ''}
+      ${parts.length ? `<span class="ag-parts">${parts.map(l => `<span>${rich(l)}</span>`).join('')}</span>` : ''}
+      ${notes.filter(([, t]) => t).map(([l, t]) => `<span class="ag-n">${l ? `<b>${l}:</b> ` : ''}${rich(t)}</span>`).join('')}</span>
+  </div>`;
+}
+
+function listBlock(lines) {
+  const groups = new Map();
+  lines.forEach(x => { const s = x.section || 'Other'; if (!groups.has(s)) groups.set(s, []); groups.get(s).push(x); });
+  const rank = s => { const i = LIST_SECTIONS.indexOf(s); return i < 0 ? 99 : i; };
+  return [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0])).map(([s, xs]) =>
+    `<div class="group-label">${esc(s)} <span class="muted">${xs.filter(x => x.done).length}/${xs.length}</span></div>` +
+    xs.map(x => `<div class="task ${x.done ? 'done' : ''}">
+      <button class="check" data-act="plan-done" data-id="${x.id}" ${isAdult() ? '' : 'disabled'} aria-label="${x.done ? 'Mark not done' : 'Mark done'}">${x.done ? '✓' : ''}</button>
+      <${isAdult() ? `button data-act="plan" data-id="${x.id}"` : 'div'} class="task-main">
+        <span class="ttl">${esc(x.title)}${x.qty ? ` <span class="muted">(${esc(x.qty)})</span>` : ''}</span>
+        <span class="meta">${x.who ? esc(x.who) : 'Nobody yet'}${x.notes ? ' · ' + esc(x.notes) : ''}</span>
+      </${isAdult() ? 'button' : 'div'}></div>`).join('')).join('');
+}
+
+// Adult leaders only: the server never sends budget lines to the youth PIN.
+function budgetBlock(scope) {
+  const attr = scope.project ? `data-project="${scope.project}"` : `data-event="${scope.event}"`;
+  const all = planFor('budget', scope);
+  const approved = all.find(x => x.section === 'approved');
+  const hasCap = !!approved && approved.planned != null;
+  const lines = all.filter(x => x.section !== 'approved').sort((a, b) => (b.planned || 0) - (a.planned || 0) || a.title.localeCompare(b.title));
+  const planned = sum(lines, 'planned');
+  const spent = sum(lines, 'actual');
+  const cap = hasCap ? approved.planned : planned;
+  const stat = (label, val, bad) => `<div><span>${label}</span><b class="${bad ? 'danger' : ''}">${val}</b></div>`;
+  return `<div class="stats">
+      ${stat('Approved', hasCap ? money(approved.planned) : '—')}
+      ${stat('Planned', money(planned), hasCap && planned > approved.planned)}
+      ${stat('Spent', money(spent))}
+      ${stat('Left', money(cap - spent), cap - spent < 0)}
+    </div>
+    ${cap ? `<div class="bar"><i class="${spent > cap ? 'over' : ''}" style="width:${Math.min(100, Math.round((spent / cap) * 100))}%"></i></div>` : ''}
+    ${lines.map(x => `<button class="row-item" data-act="plan" data-id="${x.id}">
+      <span class="grow"><span class="ttl">${esc(x.title)}</span>${x.notes ? `<span class="meta">${esc(x.notes)}</span>` : ''}</span>
+      <span class="amt"><b>${money(x.planned) || '—'}</b>${x.actual != null ? `<span class="meta ${x.planned != null && x.actual > x.planned ? 'danger' : ''}">${money(x.actual)} spent</span>` : ''}</span>
+    </button>`).join('') || empty('No budget lines yet.')}
+    <div class="btn-row no-print"><button class="btn primary" data-act="new-plan" data-kind="budget" ${attr}>+ Budget line</button>
+      <button class="btn" ${approved ? `data-act="plan" data-id="${approved.id}"` : `data-act="new-plan" data-kind="budget" data-section="approved" ${attr}`}>${approved ? 'Change' : 'Set'} approved budget</button></div>`;
+}
+
+/* ---------- event page: one place to plan an activity ---------- */
+function vEvent() {
+  const e = byId('events', S.sub);
+  if (!e) { S.view = 'calendar'; return vCalendar(); }
+  const proj = byId('projects', e.project_id);
+  const adults = e.adults.map(id => byId('people', id)).filter(Boolean);
+  const scope = { event: e.id };
+  const attr = `data-event="${e.id}"`;
+  const agenda = planFor('agenda', scope).sort(byAgenda);
+  const list = planFor('list', scope);
+  const tasks = eventTasks(e.id).sort(byDue);
+  const n = needs(e);
+  const past = !upcoming(e);
+  const b = S.back || { view: 'calendar' };
+  const backLabel = b.view === 'project' ? (byId('projects', b.sub) || {}).title || 'Project' : { home: 'Home', tasks: 'Assignments' }[b.view] || 'Calendar';
+  const add = kind => (isAdult() ? `<button class="link no-print" data-act="new-plan" data-kind="${kind}" ${attr}>+ Add</button>` : '');
+  const hasRecap = !!e.recap || e.youth_count != null || e.adult_count != null;
+  const attendance = [e.youth_count != null ? `${e.youth_count} youth` : '', e.adult_count != null ? `${e.adult_count} adults` : ''].filter(Boolean).join(', ');
+  return `<button class="back no-print" data-act="back">‹ ${esc(backLabel)}</button>
+    <section class="card">
+      <div class="proj-top"><div><div class="eyebrow">${esc([e.category, e.audience].filter(Boolean).join(' · '))}</div><h2>${esc(e.title)}</h2>
+        <div class="meta">${whenText(e, true)}</div></div>${past ? '' : countdown(e.start_date)}</div>
+      <dl class="facts">
+        <dt>Where</dt><dd>${esc(e.location) || '<span class="muted">Not set</span>'}</dd>
+        ${e.info_only ? '' : `<dt>Adult leaders</dt><dd>${adults.length ? adults.map(a => esc(a.name)).join(', ') : '<span class="muted">None listed</span>'}</dd>`}
+        ${proj ? `<dt>Project</dt><dd><button class="link" data-act="project" data-id="${proj.id}">${esc(proj.title)}</button></dd>` : ''}
+        ${e.description ? `<dt>Details</dt><dd class="pre">${esc(e.description)}</dd>` : ''}
+      </dl>
+      ${e.info_only ? '<p class="meta note-line">Calendar note only. Nothing to plan.</p>' : ''}
+      ${isAdult() && !past && n.length ? `<div class="needs-box">${ICON.alert}<span>Still needs ${esc(n.join(', '))}.${youthEvent(e) && e.adults.length < 2 ? ' Plan for at least two responsible adults (General Handbook 10.8.1).' : ''}</span></div>` : ''}
+      <div class="btn-row no-print"><button class="btn" data-act="ics" data-id="${e.id}">Add to my calendar</button>
+        ${isAdult() ? `<button class="btn primary" data-act="edit-event" data-id="${e.id}">Edit</button>${e.info_only ? '' : `<button class="btn" data-act="copy-plan" data-id="${e.id}">Copy a plan…</button>`}` : ''}
+        ${e.info_only ? '' : '<button class="btn ghost" data-act="print">Print</button>'}</div>
+    </section>
+    ${e.info_only ? '' : `<section class="card"><div class="card-h"><h3>Schedule</h3>${add('agenda')}</div>${agendaBlock(agenda, 'full', false)}</section>
+    <section class="card"><div class="card-h"><h3>Assignments</h3>${isAdult() ? `<button class="link no-print" data-act="new-task" ${attr}>+ Add</button>` : ''}</div>
+      ${tasks.length ? tasks.map(x => taskRow(x, false)).join('') : empty('No assignments yet. Each one shows up on its owner\'s home screen.')}</section>
+    <section class="card"><div class="card-h"><h3>Food, set-up, and what to bring</h3>${add('list')}</div>
+      ${list.length ? listBlock(list) : empty('Nothing on the list yet.') + (isAdult() ? `<div class="btn-row center no-print"><button class="btn" data-act="starter" data-id="${e.id}">Start with the senior activity checklist</button></div>` : '')}</section>
+    ${isAdult() ? `<section class="card no-print"><div class="card-h"><h3>Budget</h3><span class="meta">Adult leaders only</span></div>${budgetBlock(scope)}</section>` : ''}
+    ${past || hasRecap ? `<section class="card"><div class="card-h"><h3>After the event</h3>${isAdult() ? `<button class="link no-print" data-act="recap" data-id="${e.id}">${hasRecap ? 'Edit' : '+ Add'}</button>` : ''}</div>
+      ${hasRecap ? `<dl class="facts flush">${attendance ? `<dt>Attendance</dt><dd>${attendance}</dd>` : ''}${e.recap ? `<dt>Notes</dt><dd class="pre">${esc(e.recap)}</dd>` : ''}</dl>`
+        : empty('Write down who came and what to keep or change, so next year starts ahead.')}</section>` : ''}`}`;
 }
 
 function vMore() {
@@ -584,18 +911,22 @@ function personOptions(selected, kinds = ['adult', 'youth']) {
 }
 
 function taskSheet(x) {
+  const ev = byId('events', x.event_id);
   if (!isAdult()) {
     const proj = byId('projects', x.project_id);
     return sheetHead(x.title, x.area || 'Assignment') + `<dl class="facts">
       <dt>Owner</dt><dd>${esc(personName(x.owner_id)) || 'Unassigned'}</dd>
       <dt>Due</dt><dd>${x.due_date ? fmtDate(x.due_date, { weekday: 'short', month: 'long', day: 'numeric' }) : 'No date'}</dd>
       ${proj ? `<dt>Project</dt><dd>${esc(proj.title)}</dd>` : ''}
+      ${ev ? `<dt>Event</dt><dd>${esc(ev.title)} · ${fmtDate(ev.start_date)}</dd>` : ''}
       ${x.notes ? `<dt>Notes</dt><dd class="pre">${esc(x.notes)}</dd>` : ''}</dl>
       ${canToggle(x) ? `<div class="btn-row"><button class="btn primary" data-act="toggle" data-id="${x.id}" data-close="1">${x.done ? 'Mark not done' : 'Mark done'}</button></div>` : ''}`;
   }
   const areas = [...new Set([...AREA_ORDER, ...S.data.tasks.map(t => t.area).filter(Boolean)])];
   return sheetHead(x.id ? 'Edit assignment' : 'New assignment') + `<form data-form="task" class="stack">
     <input type="hidden" name="id" value="${esc(x.id || '')}">
+    <input type="hidden" name="event_id" value="${esc(x.event_id || '')}">
+    ${ev ? `<p class="meta">For ${esc(ev.title)} · ${fmtDate(ev.start_date, { weekday: 'short', month: 'short', day: 'numeric' })}</p>` : ''}
     <label>What needs to happen<input name="title" value="${esc(x.title || '')}" required></label>
     <div class="two">
       <label>Owner<select name="owner_id"><option value="">Unassigned</option>${personOptions(x.owner_id)}</select></label>
@@ -613,25 +944,9 @@ function taskSheet(x) {
   </form>`;
 }
 
-function eventDetail(e) {
-  const proj = byId('projects', e.project_id);
-  const adults = e.adults.map(id => byId('people', id)).filter(Boolean);
-  const warn = youthEvent(e) && adults.length < 2;
-  return sheetHead(e.title, e.category || 'Event') + `<dl class="facts">
-      <dt>When</dt><dd>${whenText(e, true)}</dd>
-      ${e.location ? `<dt>Where</dt><dd>${esc(e.location)}</dd>` : ''}
-      ${e.audience ? `<dt>Who</dt><dd>${esc(e.audience)}</dd>` : ''}
-      <dt>Adult leaders</dt><dd>${adults.length ? adults.map(a => esc(a.name)).join(', ') : '<span class="muted">None listed</span>'}
-        ${warn ? '<div class="danger small">Plan for at least two responsible adults (GH 10.8.1).</div>' : ''}</dd>
-      ${proj ? `<dt>Project</dt><dd><button class="link" data-act="project" data-id="${proj.id}">${esc(proj.title)}</button></dd>` : ''}
-      ${e.description ? `<dt>Details</dt><dd class="pre">${esc(e.description)}</dd>` : ''}
-    </dl>
-    <div class="btn-row"><button class="btn" data-act="ics" data-id="${e.id}">Add to my calendar</button>
-      ${isAdult() ? `<button class="btn primary" data-act="edit-event" data-id="${e.id}">Edit</button>` : ''}</div>`;
-}
-
 function eventSheet(e) {
   const adults = S.data.people.filter(p => p.kind === 'adult' && (p.active !== false || e.adults.includes(p.id))).sort(byName);
+  const sibs = e.id ? S.data.events.filter(x => x.id !== e.id && x.title === e.title && x.start_date >= today()).length : 0;
   return sheetHead(e.id ? 'Edit event' : 'New event') + `<form data-form="event" class="stack">
     <input type="hidden" name="id" value="${esc(e.id || '')}">
     <label>Title<input name="title" value="${esc(e.title || '')}" required></label>
@@ -652,7 +967,9 @@ function eventSheet(e) {
     <fieldset><legend>Adult leaders attending <small class="muted">at least 2 for youth events</small></legend>
       <div class="checks">${adults.map(p => `<label class="check-row"><input type="checkbox" name="adults" value="${p.id}" ${e.adults.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('') || '<p class="muted">Add adult leaders under More → Leaders first.</p>'}</div>
     </fieldset>
+    ${sibs ? `<label class="check-row"><input type="checkbox" name="series"> Also use this location and these adult leaders for the ${sibs} other upcoming “${esc(e.title)}” event${sibs > 1 ? 's' : ''}</label>` : ''}
     <label>Details<textarea name="description" rows="3">${esc(e.description || '')}</textarea></label>
+    <label class="check-row"><input type="checkbox" name="info_only" ${e.info_only ? 'checked' : ''}> Calendar note only (nothing to plan, no adult leaders needed)</label>
     <div class="btn-row"><button class="btn primary" type="submit">Save</button>
       ${e.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="event" data-id="${e.id}">Delete</button>` : ''}</div>
   </form>`;
@@ -673,7 +990,7 @@ function projectSheet(p) {
     <label>Status<select name="status">${Object.entries(STATUSES).map(([k, l]) => opt(k, l, k === (p.status || 'planning'))).join('')}</select></label>
     <label>Purpose <small class="muted">what the youth want this to accomplish</small><textarea name="purpose" rows="3">${esc(p.purpose || '')}</textarea></label>
     <label>Notes<textarea name="notes" rows="3">${esc(p.notes || '')}</textarea></label>
-    ${p.id ? '' : '<label class="check-row"><input type="checkbox" name="checklist" checked> Start with the planning checklist (${CHECKLIST.length} tasks you can edit)</label>'}
+    ${p.id ? '' : `<label class="check-row"><input type="checkbox" name="checklist" checked> Start with the planning checklist (${CHECKLIST.length} tasks you can edit)</label>`}
     <div class="btn-row"><button class="btn primary" type="submit">Save</button>
       ${p.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="project" data-id="${p.id}">Delete</button>` : ''}</div>
   </form>`;
@@ -701,10 +1018,124 @@ function personSheet(p) {
   </form>`;
 }
 
+/* ---------- plan line sheets ---------- */
+const planHidden = x => ['id', 'kind', 'project_id', 'event_id'].map(k => `<input type="hidden" name="${k}" value="${esc(x[k] || '')}">`).join('');
+const planButtons = x => `<div class="btn-row"><button class="btn primary" type="submit">Save</button>
+  ${x.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="plan" data-id="${x.id}">Delete</button>` : ''}</div>`;
+function whoList() {
+  // Groups, adult leaders, and youth leaders with a role (not the whole senior roster).
+  const names = S.data.people.filter(p => p.active !== false && (p.kind === 'adult' || !/^senior/i.test(p.role || ''))).sort(byName).map(p => p.name);
+  return `<datalist id="who">${[...WHO_GROUPS, ...names].map(n => `<option value="${esc(n)}">`).join('')}</datalist>`;
+}
+const planSheet = x => (x.kind === 'agenda' ? agendaSheet(x) : x.kind === 'budget' ? budgetSheet(x) : listSheet(x));
+
+function agendaSheet(x) {
+  const ev = byId('events', x.event_id);
+  const multi = !ev || (ev.end_date && ev.end_date !== ev.start_date);
+  const extra = !ev || x.av || x.notes || x.senior_notes || x.chaperone_notes || x.high_level;
+  return sheetHead(x.id ? 'Edit schedule item' : 'Add to the schedule', ev ? ev.title : (byId('projects', x.project_id) || {}).title) + `<form data-form="plan" class="stack">
+    ${planHidden(x)}
+    <label>What happens<input name="title" value="${esc(x.title || '')}" required placeholder="Opening meeting, dinner, travel…"></label>
+    ${multi ? `<label>Day<input type="date" name="day" value="${esc(x.day || '')}" ${ev ? `min="${ev.start_date}" max="${ev.end_date}"` : ''} required></label>`
+      : `<input type="hidden" name="day" value="${esc(x.day || ev.start_date)}">`}
+    <div class="two">
+      <label>Start <small class="muted">blank = a note for the day</small><input type="time" name="start_time" value="${esc(x.start_time || '')}"></label>
+      <label>End<input type="time" name="end_time" value="${esc(x.end_time || '')}"></label>
+    </div>
+    <div class="two">
+      <label>Where<input name="location" value="${esc(x.location || '')}"></label>
+      <label>Who leads<input name="who" list="who" value="${esc(x.who || '')}"></label>
+    </div>
+    <label>Parts <small class="muted">one per line: conducting, prayers, stations, games…</small><textarea name="detail" rows="${Math.min(10, Math.max(2, String(x.detail || '').split('\n').length))}">${esc(x.detail || '')}</textarea></label>
+    <label>Who it is for<select name="section"><option value="">Everyone</option>${AGENDA_FOR.map(a => opt(a, a + ' only', a === x.section)).join('')}</select></label>
+    <details ${extra ? 'open' : ''}><summary>Set-up and notes for seniors and chaperones</summary><div class="stack">
+      <label>AV needs<input name="av" value="${esc(x.av || '')}" placeholder="Microphone, slides, music…"></label>
+      <label>Set-up<textarea name="notes" rows="2">${esc(x.notes || '')}</textarea></label>
+      <label>Notes for seniors<textarea name="senior_notes" rows="2">${esc(x.senior_notes || '')}</textarea></label>
+      <label>Notes for chaperones<textarea name="chaperone_notes" rows="2">${esc(x.chaperone_notes || '')}</textarea></label>
+      <label class="check-row"><input type="checkbox" name="high_level" ${x.high_level ? 'checked' : ''}> Show on the high-level agenda</label>
+    </div></details>
+    ${planButtons(x)}
+  </form>${whoList()}`;
+}
+
+function listSheet(x) {
+  const sections = [...new Set([...LIST_SECTIONS, ...S.data.plan.filter(l => l.kind === 'list').map(l => l.section).filter(Boolean)])];
+  return sheetHead(x.id ? 'Edit list item' : 'Add to the list', (byId('events', x.event_id) || {}).title) + `<form data-form="plan" class="stack">
+    ${planHidden(x)}
+    <label>What is needed<input name="title" value="${esc(x.title || '')}" required placeholder="Dinner, tables and chairs, permission slips…"></label>
+    <div class="two">
+      <label>Group<input name="section" list="sections" value="${esc(x.section || '')}" placeholder="Food, Set up, To bring…"></label>
+      <label>How many <small class="muted">optional</small><input name="qty" value="${esc(x.qty || '')}"></label>
+    </div>
+    <label>Who has it<input name="who" list="who" value="${esc(x.who || '')}" placeholder="YM presidency, YW presidency, a name…"></label>
+    <label>Notes<input name="notes" value="${esc(x.notes || '')}"></label>
+    <label class="check-row"><input type="checkbox" name="done" ${x.done ? 'checked' : ''}> Taken care of</label>
+    ${planButtons(x)}
+  </form><datalist id="sections">${sections.map(n => `<option value="${esc(n)}">`).join('')}</datalist>${whoList()}`;
+}
+
+function budgetSheet(x) {
+  const amount = (name, v, req) => `<input name="${name}" type="number" inputmode="decimal" min="0" step="0.01" value="${v ?? ''}" ${req ? 'required' : ''}>`;
+  if (x.section === 'approved') {
+    return sheetHead('Approved budget') + `<form data-form="plan" class="stack">
+      ${planHidden(x)}<input type="hidden" name="section" value="approved"><input type="hidden" name="title" value="Approved budget">
+      <label>Amount the stake presidency approved${amount('planned', x.planned, true)}</label>
+      <label>Notes<input name="notes" value="${esc(x.notes || '')}"></label>
+      ${planButtons(x)}
+    </form>`;
+  }
+  return sheetHead(x.id ? 'Edit budget line' : 'New budget line') + `<form data-form="plan" class="stack">
+    ${planHidden(x)}
+    <label>What it is for<input name="title" value="${esc(x.title || '')}" required placeholder="Food, T-shirts, facility…"></label>
+    <div class="two">
+      <label>Planned${amount('planned', x.planned)}</label>
+      <label>Spent so far${amount('actual', x.actual)}</label>
+    </div>
+    <label>Notes<input name="notes" value="${esc(x.notes || '')}"></label>
+    ${planButtons(x)}
+  </form>`;
+}
+
+function recapSheet(e) {
+  return sheetHead('After the event', e.title) + `<form data-form="recap" class="stack">
+    <input type="hidden" name="id" value="${e.id}">
+    <div class="two">
+      <label>Youth who came<input name="youth_count" type="number" inputmode="numeric" min="0" value="${e.youth_count ?? ''}"></label>
+      <label>Adults who came<input name="adult_count" type="number" inputmode="numeric" min="0" value="${e.adult_count ?? ''}"></label>
+    </div>
+    <label>What to keep, change, or try next time <small class="muted">food amounts, what worked, what did not</small><textarea name="recap" rows="6">${esc(e.recap || '')}</textarea></label>
+    <div class="btn-row"><button class="btn primary" type="submit">Save</button></div>
+  </form>`;
+}
+
+function copySheet(e) {
+  const src = S.data.events.filter(x => x.id !== e.id && (S.data.plan.some(l => l.event_id === x.id) || S.data.tasks.some(t => t.event_id === x.id)))
+    .sort((a, b) => byEventDate(b, a));
+  if (!src.length) return sheetHead('Copy a plan', e.title) + empty('No other event has a plan to copy yet.');
+  return sheetHead('Copy a plan', e.title) + `<form data-form="copy-plan" class="stack">
+    <input type="hidden" name="to" value="${e.id}">
+    <label>Copy from<select name="from">${src.map(x => opt(x.id, `${x.title} · ${fmtDate(x.start_date, { month: 'short', day: 'numeric', year: 'numeric' })}`)).join('')}</select></label>
+    <p class="meta">Copies the schedule, the list, the assignments, and the planned budget amounts into this event. Dates shift to match. Nothing is marked done, and nothing already here is removed.</p>
+    <div class="btn-row"><button class="btn primary" type="submit">Copy</button></div>
+  </form>`;
+}
+
+function bulkDateSheet(p, area) {
+  const n = S.data.tasks.filter(x => x.project_id === p.id && areaOf(x) === area && !x.done && !x.due_date).length;
+  return sheetHead('Set a due date', area) + `<form data-form="bulk-date" class="stack">
+    <input type="hidden" name="project" value="${p.id}"><input type="hidden" name="area" value="${esc(area)}">
+    <label>Due date for the ${n} open task${n > 1 ? 's' : ''} without one<input type="date" name="due_date" required></label>
+    <p class="meta">Tasks that already have a date are left alone. You can still change each one after.</p>
+    <div class="btn-row"><button class="btn primary" type="submit">Set date</button></div>
+  </form>`;
+}
+
 /* ---------- saving ---------- */
 function upsertLocal(kind, row) {
   const list = S.data[KEY[kind]];
   if (kind === 'event') row = normalize({ events: [row] }).events[0];
+  if (kind === 'plan') row = normalize({ plan: [row] }).plan[0];
   const i = list.findIndex(x => x.id === row.id);
   if (i >= 0) list[i] = row; else list.push(row);
   return row;
@@ -735,7 +1166,7 @@ const FORMS = {
   async task(f) {
     const v = vals(f);
     await busy(f, async () => {
-      await save('task', { id: v.id || undefined, title: v.title, owner_id: v.owner_id || null, due_date: v.due_date || null, project_id: v.project_id || null, area: v.area, notes: v.notes });
+      await save('task', { id: v.id || undefined, title: v.title, owner_id: v.owner_id || null, due_date: v.due_date || null, project_id: v.project_id || null, event_id: v.event_id || null, area: v.area, notes: v.notes });
       closeSheet(); render(); toast('Saved');
     });
   },
@@ -743,13 +1174,54 @@ const FORMS = {
     const v = vals(f);
     if (v.end_date && v.end_date < v.start_date) return toast('End date is before the start date.');
     await busy(f, async () => {
-      await save('event', {
-        id: v.id || undefined, title: v.title, category: v.category, audience: v.audience, start_date: v.start_date,
+      const old = v.id ? byId('events', v.id) : null;
+      const e = await save('event', {
+        ...(old || {}), id: v.id || undefined, title: v.title, category: v.category, audience: v.audience, start_date: v.start_date,
         end_date: v.end_date && v.end_date !== v.start_date ? v.end_date : null, start_time: v.start_time || null, end_time: v.end_time || null,
-        location: v.location, project_id: v.project_id || null, description: v.description,
+        location: v.location, project_id: v.project_id || null, description: v.description, info_only: !!v.info_only,
         adults: [...f.querySelectorAll('input[name=adults]:checked')].map(i => i.value),
       });
+      let n = 0;
+      if (v.series && old) {
+        for (const x of S.data.events.filter(x => x.id !== e.id && x.title === old.title && x.start_date >= today())) {
+          await save('event', { ...x, location: e.location, adults: e.adults }); n++;
+        }
+      }
+      closeSheet(); render(); toast(n ? `Saved. Also updated ${n} other event${n > 1 ? 's' : ''}.` : 'Saved');
+    });
+  },
+  async plan(f) {
+    const v = vals(f);
+    await busy(f, async () => {
+      const row = { ...(v.id ? byId('plan', v.id) : {}), id: v.id || undefined, kind: v.kind, project_id: v.project_id || null, event_id: v.event_id || null, title: v.title, notes: v.notes || '' };
+      if (v.kind === 'agenda') Object.assign(row, { day: v.day || null, start_time: v.start_time || null, end_time: v.end_time || null, location: v.location, who: v.who,
+        av: v.av, senior_notes: v.senior_notes, chaperone_notes: v.chaperone_notes, high_level: !!v.high_level, section: v.section || '', detail: v.detail || '' });
+      else if (v.kind === 'list') Object.assign(row, { section: v.section, qty: v.qty, who: v.who, done: !!v.done });
+      else Object.assign(row, { section: v.section || '', planned: num(v.planned), actual: num(v.actual) });
+      await save('plan', row);
       closeSheet(); render(); toast('Saved');
+    });
+  },
+  async recap(f) {
+    const v = vals(f);
+    await busy(f, async () => {
+      await save('event', { ...byId('events', v.id), youth_count: num(v.youth_count), adult_count: num(v.adult_count), recap: v.recap });
+      closeSheet(); render(); toast('Saved');
+    });
+  },
+  async 'copy-plan'(f) {
+    const v = vals(f);
+    await busy(f, async () => {
+      const n = await copyPlan(byId('events', v.from), byId('events', v.to));
+      closeSheet(); render(); toast(`Copied ${n} item${n === 1 ? '' : 's'}`);
+    });
+  },
+  async 'bulk-date'(f) {
+    const v = vals(f);
+    await busy(f, async () => {
+      const list = S.data.tasks.filter(x => x.project_id === v.project && areaOf(x) === v.area && !x.done && !x.due_date);
+      for (const x of list) await save('task', { ...x, due_date: v.due_date });
+      closeSheet(); render(); toast(`Set a due date on ${list.length} task${list.length === 1 ? '' : 's'}`);
     });
   },
   async project(f) {
@@ -784,11 +1256,27 @@ const FORMS = {
     const v = vals(f);
     await busy(f, async () => {
       await api.setPin(S.pin, v.which, v.next);
-      if (v.which === 'adult') { S.pin = v.next; store.set('sya_pin', v.next, !!localStorage.getItem('sya_pin')); }
+      if (v.which === 'adult') { S.pin = v.next; store.set(PIN_KEY, v.next, !!localStorage.getItem(PIN_KEY)); }
       f.reset(); toast(`${v.which === 'adult' ? 'Adult' : 'Youth'} PIN changed. Tell the other leaders.`);
     });
   },
 };
+
+// Copy one event's plan into another. Dates shift by the gap between the two events; nothing is marked done.
+async function copyPlan(from, to) {
+  const delta = daysBetween(from.start_date, to.start_date);
+  const shift = d => (d ? addDays(d, delta) : null);
+  const lines = S.data.plan.filter(x => x.event_id === from.id);
+  const tasks = eventTasks(from.id);
+  for (const x of lines) {
+    const { id, created_at, created_by, updated_at, updated_by, ...rest } = x;
+    await save('plan', { ...rest, event_id: to.id, day: shift(x.day), done: false, actual: null });
+  }
+  for (const t of tasks) {
+    await save('task', { title: t.title, area: t.area, notes: t.notes, owner_id: t.owner_id, project_id: t.project_id, event_id: to.id, due_date: shift(t.due_date) });
+  }
+  return lines.length + tasks.length;
+}
 
 async function addChecklist(p) {
   const rows = checklistTasks(p);
@@ -812,33 +1300,37 @@ async function toggleTask(id, undoable = true) {
   }
 }
 
-function downloadIcs(e) {
-  const escI = s => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+function downloadIcs(list, name) {
+  const escI = s => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
   const d = s => s.replace(/-/g, '');
   const dt = (date, time) => d(date) + 'T' + time.replace(':', '') + '00';
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
-  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Stake Youth//EN', 'BEGIN:VEVENT', `UID:${e.id}@stake-youth`, `DTSTAMP:${stamp}`];
-  if (e.start_time) {
-    let endDate = e.end_date || e.start_date;
-    let endTime = e.end_time;
-    if (!endTime) { const h = Number(e.start_time.slice(0, 2)) + 1; endTime = `${pad(h % 24)}${e.start_time.slice(2)}`; if (h >= 24) endDate = addDays(endDate, 1); }
-    lines.push(`DTSTART:${dt(e.start_date, e.start_time)}`, `DTEND:${dt(endDate, endTime)}`);
-  } else {
-    lines.push(`DTSTART;VALUE=DATE:${d(e.start_date)}`, `DTEND;VALUE=DATE:${d(addDays(e.end_date || e.start_date, 1))}`);
-  }
-  lines.push(`SUMMARY:${escI(e.title)}`);
-  if (e.location) lines.push(`LOCATION:${escI(e.location)}`);
-  if (e.description) lines.push(`DESCRIPTION:${escI(e.description)}`);
-  lines.push('END:VEVENT', 'END:VCALENDAR');
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Stake Youth//EN'];
+  list.forEach(e => {
+    lines.push('BEGIN:VEVENT', `UID:${e.id}@stake-youth`, `DTSTAMP:${stamp}`);
+    if (e.start_time) {
+      let endDate = e.end_date || e.start_date;
+      let endTime = e.end_time;
+      if (!endTime) { const h = Number(e.start_time.slice(0, 2)) + 1; endTime = `${pad(h % 24)}${e.start_time.slice(2)}`; if (h >= 24) endDate = addDays(endDate, 1); }
+      lines.push(`DTSTART:${dt(e.start_date, e.start_time)}`, `DTEND:${dt(endDate, endTime)}`);
+    } else {
+      lines.push(`DTSTART;VALUE=DATE:${d(e.start_date)}`, `DTEND;VALUE=DATE:${d(addDays(e.end_date || e.start_date, 1))}`);
+    }
+    lines.push(`SUMMARY:${escI(e.title)}`);
+    if (e.location) lines.push(`LOCATION:${escI(e.location)}`);
+    if (e.description) lines.push(`DESCRIPTION:${escI(e.description)}`);
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/calendar' }));
-  a.download = (e.title.replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') || 'event') + '.ics';
+  a.download = ((name || list[0].title).replace(/[^\w]+/g, '-').replace(/^-|-$/g, '') || 'event') + '.ics';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
-function go(view, sub = null) {
-  S.view = view; S.sub = sub;
+function go(view, sub = null, back = null) {
+  S.view = view; S.sub = sub; S.back = back;
   closeSheet(); render(); window.scrollTo(0, 0);
 }
 
@@ -846,23 +1338,72 @@ const ACTIONS = {
   go: el => go(el.dataset.view),
   'close-sheet': closeSheet,
   'pick-me': el => { const p = byId('people', el.dataset.id); if (p) setMe({ id: p.id, name: p.name }); },
-  'switch-me': () => { S.me = null; store.del('sya_me'); render(); },
+  'switch-me': () => { S.me = null; store.del(ME_KEY); render(); },
   signout: () => {
-    store.del('sya_pin'); store.del('sya_me');
+    store.del(PIN_KEY); store.del(ME_KEY);
     Object.assign(S, { pin: null, role: null, me: null, data: null, view: 'home', sub: null, err: '' });
     closeSheet(); render();
   },
   toggle: el => { if (el.dataset.close) closeSheet(); toggleTask(el.dataset.id); },
   task: el => openSheet(taskSheet(byId('tasks', el.dataset.id))),
-  'new-task': el => openSheet(taskSheet({ project_id: el.dataset.project || null, owner_id: null })),
-  event: el => { const e = byId('events', el.dataset.id); if (e) openSheet(eventDetail(e)); },
+  'new-task': el => openSheet(taskSheet({ project_id: el.dataset.project || null, event_id: el.dataset.event || null, area: el.dataset.area === 'General' ? '' : el.dataset.area || '', owner_id: null })),
+  event: el => go('event', el.dataset.id, S.view === 'event' ? S.back : { view: S.view, sub: S.sub }),
+  back: () => { const b = S.back || { view: 'calendar' }; go(b.view, b.sub || null); },
+  plan: el => { const x = byId('plan', el.dataset.id); if (x && isAdult()) openSheet(planSheet(x)); },
+  'new-plan': el => {
+    const d = el.dataset;
+    const ev = byId('events', d.event);
+    const proj = byId('projects', d.project);
+    const last = d.kind === 'agenda' ? planFor('agenda', d.project ? { project: d.project } : { event: d.event }).sort(byAgenda).pop() : null;
+    openSheet(planSheet({ kind: d.kind, section: d.section || '', project_id: d.project || null, event_id: d.event || null,
+      day: d.kind === 'agenda' ? (last && last.day) || (ev ? ev.start_date : proj && proj.event_date) || null : null, start_time: last ? last.end_time : '' }));
+  },
+  async 'plan-done'(el) {
+    const x = byId('plan', el.dataset.id);
+    if (!x || !isAdult()) return;
+    await busy(null, async () => { await save('plan', { ...x, done: !x.done }); render(); });
+  },
+  async starter(el) {
+    await busy(null, async () => {
+      for (const [section, title] of EVENT_STARTER) await save('plan', { kind: 'list', event_id: el.dataset.id, section, title });
+      render(); toast('Checklist added. Say who has each one.');
+    });
+  },
+  recap: el => openSheet(recapSheet(byId('events', el.dataset.id))),
+  'copy-plan': el => openSheet(copySheet(byId('events', el.dataset.id))),
+  'bulk-date': el => openSheet(bulkDateSheet(byId('projects', el.dataset.project), el.dataset.area)),
+  ptab: el => { S.ptab = el.dataset.t; render(); },
+  pfilter: el => { S.ptab = 'tasks'; S.pfilter = el.dataset.f; render(); },
+  area: el => { const a = el.dataset.a; if (S.open.has(a)) S.open.delete(a); else S.open.add(a); render(); },
+  'area-all': () => {
+    if (S.open.size) S.open.clear();
+    else S.data.tasks.filter(x => x.project_id === S.sub).forEach(x => S.open.add(areaOf(x)));
+    render();
+  },
+  amode: el => { S.amode = el.dataset.m; render(); },
+  'cal-filter': el => {
+    S.calFilter = el.dataset.f; S.day = null;
+    if (el.dataset.mode) S.calMode = el.dataset.mode;
+    if (S.view !== 'calendar') return go('calendar');
+    render();
+  },
+  'cal-mode': el => { S.calMode = el.dataset.m; render(); },
+  'cal-past': () => { S.calPast = !S.calPast; render(); },
+  print: () => window.print(),
+  'ics-all': () => {
+    const list = calEvents().filter(e => S.calPast || upcoming(e)).sort(byEventDate);
+    if (list.length) downloadIcs(list, 'youth-calendar'); else toast('No events to add.');
+  },
   'edit-event': el => openSheet(eventSheet(byId('events', el.dataset.id))),
   'new-event': el => {
     const p = byId('projects', el.dataset.project);
-    openSheet(eventSheet({ adults: [], category: p ? (CATEGORIES.includes(p.kind) ? p.kind : 'Stake activity') : 'Stake activity', audience: 'All youth',
+    openSheet(eventSheet({ adults: [], info_only: false, category: p ? (CATEGORIES.includes(p.kind) ? p.kind : 'Stake activity') : 'Stake activity', audience: 'All youth',
       start_date: S.view === 'calendar' && S.day ? S.day : (p && p.event_date) || '', project_id: p ? p.id : null, title: p ? p.title : '' }));
   },
-  project: el => go('project', el.dataset.id),
+  project: el => {
+    if (S.view !== 'project' || S.sub !== el.dataset.id) Object.assign(S, { ptab: 'overview', pfilter: 'all', open: new Set() });
+    go('project', el.dataset.id);
+  },
   'new-project': () => openSheet(projectSheet({ status: 'planning', kind: 'Youth conference' })),
   'edit-project': el => openSheet(projectSheet(byId('projects', el.dataset.id))),
   person: el => openSheet(personSheet(byId('people', el.dataset.id))),
@@ -877,7 +1418,7 @@ const ACTIONS = {
     const d = new Date(y, m - 1 + n, 1);
     S.month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; S.day = null; render();
   },
-  ics: el => downloadIcs(byId('events', el.dataset.id)),
+  ics: el => downloadIcs([byId('events', el.dataset.id)]),
   async checklist(el) {
     const p = byId('projects', el.dataset.id);
     const has = S.data.tasks.some(x => x.project_id === p.id);
@@ -888,7 +1429,8 @@ const ACTIONS = {
   },
   async delete(el) {
     const { kind, id } = el.dataset;
-    const what = { task: 'this assignment', event: 'this event', project: 'this project and all of its tasks', person: 'this person (their tasks become unassigned)' }[kind];
+    const what = { task: 'this assignment', event: 'this event and its plan (schedule, list, assignments, budget)', project: 'this project and all of its tasks, agenda, and budget',
+      person: 'this person (their tasks become unassigned)', plan: 'this line' }[kind];
     if (!confirm(`Delete ${what}? This can't be undone.`)) return;
     await busy(null, async () => {
       await api.remove(S.pin, S.me.name, kind, id);
@@ -896,7 +1438,13 @@ const ACTIONS = {
       if (kind === 'project') {
         S.data.tasks = S.data.tasks.filter(t => t.project_id !== id);
         S.data.events.forEach(e => { if (e.project_id === id) e.project_id = null; });
+        S.data.plan = S.data.plan.filter(x => x.project_id !== id);
         if (S.view === 'project') S.view = 'projects';
+      }
+      if (kind === 'event') {
+        S.data.tasks = S.data.tasks.filter(t => t.event_id !== id);
+        S.data.plan = S.data.plan.filter(x => x.event_id !== id);
+        if (S.view === 'event') { const b = S.back || { view: 'calendar' }; Object.assign(S, { view: b.view, sub: b.sub || null, back: null }); }
       }
       if (kind === 'person') {
         S.data.tasks.forEach(t => { if (t.owner_id === id) t.owner_id = null; });
@@ -916,12 +1464,12 @@ const ACTIONS = {
 async function signIn(pin, remember) {
   const d = await api.load(pin);
   S.pin = pin; S.role = d.role; S.data = normalize(d); S.loadedAt = Date.now();
-  store.del('sya_pin');
-  store.set('sya_pin', pin, remember);
+  store.del(PIN_KEY);
+  store.set(PIN_KEY, pin, remember);
 }
 function setMe(me) {
   S.me = me;
-  store.set('sya_me', JSON.stringify(me), !!localStorage.getItem('sya_pin'));
+  store.set(ME_KEY, JSON.stringify(me), !!localStorage.getItem(PIN_KEY));
   S.view = 'home'; render();
 }
 
@@ -930,8 +1478,10 @@ function render() {
   const app = $('#app');
   if (!S.data) { app.innerHTML = vPin(); return; }
   if (!S.me) { app.innerHTML = vWho(); return; }
-  const views = { home: vHome, calendar: vCalendar, tasks: vTasks, projects: vProjects, project: vProject, more: vMore, people: vPeople, resources: vResources, settings: vSettings };
+  const views = { home: vHome, calendar: vCalendar, event: vEvent, tasks: vTasks, projects: vProjects, project: vProject, more: vMore, people: vPeople, resources: vResources, settings: vSettings };
   app.innerHTML = header() + `<main class="wrap">${(views[S.view] || vHome)()}</main>` + nav();
+  const on = $('.ptabs .on');   // keep the open project tab in view on a narrow screen
+  if (on) on.parentElement.scrollLeft = on.offsetLeft - 60;
 }
 
 let toastTimer;
@@ -945,6 +1495,7 @@ function toast(msg, undo) {
 }
 
 document.addEventListener('click', e => {
+  if (e.target.closest('a[href]')) return;
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
   const fn = ACTIONS[el.dataset.act];
@@ -962,20 +1513,23 @@ document.addEventListener('input', e => {
   const q = e.target.value.toLowerCase();
   document.querySelectorAll(sel).forEach(b => { b.hidden = !b.textContent.toLowerCase().includes(q); });
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#sheet-root').innerHTML) closeSheet(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#sheet-root').innerHTML) closeSheet();
+  if (e.key === 'Enter' && e.target.matches('div[role=button][data-act]')) e.target.click();
+});
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible' || !S.pin || Date.now() - S.loadedAt < 60000 || $('#sheet-root').innerHTML) return;
   try { const d = await api.load(S.pin); S.role = d.role; S.data = normalize(d); S.loadedAt = Date.now(); render(); } catch { /* keep what we have */ }
 });
 
 (async function boot() {
-  const pin = store.get('sya_pin');
+  const pin = store.get(PIN_KEY);
   if (pin) {
     try {
-      await signIn(pin, !!localStorage.getItem('sya_pin'));
-      const me = JSON.parse(store.get('sya_me') || 'null');
+      await signIn(pin, !!localStorage.getItem(PIN_KEY));
+      const me = JSON.parse(store.get(ME_KEY) || 'null');
       if (me && me.name) S.me = { id: me.id && byId('people', me.id) ? me.id : null, name: me.name };
-    } catch { store.del('sya_pin'); }
+    } catch { store.del(PIN_KEY); }
   }
   render();
 })();

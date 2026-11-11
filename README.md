@@ -10,6 +10,24 @@ Supabase project. Nothing here touches Jericho's project.
 `snbadger/stake-youth`, which is a copy of this folder without `PINS-private.txt`). This folder is
 the source of record; to deploy a change, copy the files into a clone of that repo and push.
 
+## What it does
+
+- **Calendar** — month view or a list by month (the same shape as the printed senior calendar).
+  Filter to Seniors, SYC, leader meetings, or events that still need something. Print the list or
+  add every event to a phone calendar at once.
+- **Event pages** — tap any event to plan it: schedule, assignments (they show on each owner's
+  home screen), a food / set-up / what-to-bring list, a budget, and an after-the-event recap
+  (attendance, what to keep or change). "Copy a plan" reuses last time's plan with the dates
+  shifted. Events that repeat (dance practice, choir) can share a location and adult leaders in
+  one save. Mark an event "calendar note only" when there is nothing to plan.
+- **Needs attention** — the home screen lists events in the next 45 days that lack a location, a
+  time, or two adult leaders.
+- **Projects (SYC)** — Overview, Committees (tasks grouped by committee, with filters for mine,
+  unassigned, no due date, overdue, and a bulk due-date setter), Timeline (tasks and events by
+  month), Agenda (the run of show by day, with views for seniors, chaperones, and a high-level
+  version; printable), and Budget (approved, planned, spent, left).
+- **Assignments** — everyone's tasks, with owners and due dates.
+
 ## Files
 
 ```
@@ -28,6 +46,7 @@ icon.svg               App icon
 |---|---|---|
 | See calendar, assignments, projects, leader list | yes | yes |
 | Check off tasks | any | only their own |
+| See budgets | yes | no (the server never sends them) |
 | Add/edit/delete anything, settings, PINs | yes | no |
 
 Everyone taps their name once per device (or types it). Youth leaders are listed as first name
@@ -35,8 +54,16 @@ and last initial — the app never needs more than that.
 
 ## Demo mode
 
-Open `index.html` with no Supabase keys. Adult PIN **1111**, youth PIN **2222**. Sample data is
-labeled "(sample)"; reset it under More → Settings.
+Add `?demo` to the address (for example `http://localhost:8120/?demo`), or open `index.html` with
+no Supabase keys. Adult PIN **1111**, youth PIN **2222**. Sample data is labeled "(sample)"; reset
+it under More → Settings. Demo mode saves to the device only and keeps its own sign-in, so trying
+it never touches live data or signs the device out of the live app.
+
+## Updating a live database
+
+When `supabase/schema.sql` changes, paste the whole file into the Supabase SQL editor and run it
+again **before** publishing the new app files. It only adds what is missing and replaces the
+functions; no data is changed. The older app keeps working against the newer database.
 
 ## Going live (about 20 minutes)
 
