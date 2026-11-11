@@ -301,18 +301,16 @@ const isMine = x => {
 };
 const canToggle = x => isAdult() || isMine(x);
 const eventsOn = (d, list = S.data.events) => list.filter(e => e.start_date <= d && (e.end_date || e.start_date) >= d).sort(byEventDate);
-const youthEvent = e => e.audience !== 'Adult leaders';
 const upcoming = e => (e.end_date || e.start_date) >= today();
 const isSyc = e => e.category === 'Youth conference' || (byId('projects', e.project_id) || {}).kind === 'Youth conference';
 const planFor = (kind, scope) => S.data.plan.filter(x => x.kind === kind && (scope.project ? x.project_id === scope.project : x.event_id === scope.event));
 const eventTasks = id => S.data.tasks.filter(x => x.event_id === id);
-// What an event still needs before it is ready. Calendar notes (info_only) need nothing.
+// What an event still needs before it is ready: a place and a time. Calendar notes (info_only) need nothing.
 function needs(e) {
   if (e.info_only) return [];
   const n = [];
   if (!e.location) n.push('a location');
   if (!e.start_time && !e.end_date) n.push('a time');
-  if (youthEvent(e) && e.adults.length < 2) n.push(e.adults.length ? '1 more adult leader' : '2 adult leaders');
   return n;
 }
 function calEvents() {
@@ -394,7 +392,7 @@ function eventRow(e) {
   return `<button class="row-item" data-act="event" data-id="${e.id}">
     <span class="datebox cat-${catKey(e.category)}"><span>${d.toLocaleDateString(undefined, { month: 'short' })}</span><b>${d.getDate()}</b></span>
     <span class="grow"><span class="ttl">${esc(e.title)}</span><span class="meta">${whenText(e)}${e.location ? ' · ' + esc(e.location) : ''}${started ? ' · plan started' : ''}</span>
-      ${n.length ? `<span class="needs">Needs ${esc(n.join(', '))}</span>` : ''}</span>
+      ${n.length ? `<span class="needs">Needs ${esc(n.join(' and '))}</span>` : ''}</span>
     ${e.category ? pill(e.category, 'cat cat-' + catKey(e.category)) : ''}
   </button>`;
 }
@@ -474,7 +472,7 @@ function attention() {
   if (!list.length) return '';
   return `<section class="card attn"><div class="card-h"><h3>Needs attention</h3>
       ${list.length > 4 ? `<button class="link" data-act="cal-filter" data-f="needs" data-mode="list">See all ${list.length}</button>` : ''}</div>
-    <p class="meta">Events in the next 45 days that still need a location, a time, or two adult leaders (General Handbook 10.8.1).</p>
+    <p class="meta">Events in the next 45 days that still need a location or a time.</p>
     ${list.slice(0, 4).map(eventRow).join('')}</section>`;
 }
 
@@ -812,7 +810,7 @@ function vEvent() {
         ${e.description ? `<dt>Details</dt><dd class="pre">${esc(e.description)}</dd>` : ''}
       </dl>
       ${e.info_only ? '<p class="meta note-line">Calendar note only. Nothing to plan.</p>' : ''}
-      ${isAdult() && !past && n.length ? `<div class="needs-box">${ICON.alert}<span>Still needs ${esc(n.join(', '))}.${youthEvent(e) && e.adults.length < 2 ? ' Plan for at least two responsible adults (General Handbook 10.8.1).' : ''}</span></div>` : ''}
+      ${isAdult() && !past && n.length ? `<div class="needs-box">${ICON.alert}<span>Still needs ${esc(n.join(' and '))}.</span></div>` : ''}
       <div class="btn-row no-print"><button class="btn" data-act="ics" data-id="${e.id}">Add to my calendar</button>
         ${isAdult() ? `<button class="btn primary" data-act="edit-event" data-id="${e.id}">Edit</button>${e.info_only ? '' : `<button class="btn" data-act="copy-plan" data-id="${e.id}">Copy a plan…</button>`}` : ''}
         ${e.info_only ? '' : '<button class="btn ghost" data-act="print">Print</button>'}</div>
@@ -964,12 +962,12 @@ function eventSheet(e) {
     </div>
     <label>Location<input name="location" value="${esc(e.location || '')}"></label>
     <label>Project<select name="project_id"><option value="">None</option>${S.data.projects.slice().sort(byProjectDate).map(p => opt(p.id, p.title, p.id === e.project_id)).join('')}</select></label>
-    <fieldset><legend>Adult leaders attending <small class="muted">at least 2 for youth events</small></legend>
+    <fieldset><legend>Adult leaders attending <small class="muted">optional</small></legend>
       <div class="checks">${adults.map(p => `<label class="check-row"><input type="checkbox" name="adults" value="${p.id}" ${e.adults.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('') || '<p class="muted">Add adult leaders under More → Leaders first.</p>'}</div>
     </fieldset>
     ${sibs ? `<label class="check-row"><input type="checkbox" name="series"> Also use this location and these adult leaders for the ${sibs} other upcoming “${esc(e.title)}” event${sibs > 1 ? 's' : ''}</label>` : ''}
     <label>Details<textarea name="description" rows="3">${esc(e.description || '')}</textarea></label>
-    <label class="check-row"><input type="checkbox" name="info_only" ${e.info_only ? 'checked' : ''}> Calendar note only (nothing to plan, no adult leaders needed)</label>
+    <label class="check-row"><input type="checkbox" name="info_only" ${e.info_only ? 'checked' : ''}> Calendar note only (nothing to plan)</label>
     <div class="btn-row"><button class="btn primary" type="submit">Save</button>
       ${e.id ? `<button class="btn danger ghost" type="button" data-act="delete" data-kind="event" data-id="${e.id}">Delete</button>` : ''}</div>
   </form>`;

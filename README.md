@@ -20,8 +20,8 @@ the source of record; to deploy a change, copy the files into a clone of that re
   (attendance, what to keep or change). "Copy a plan" reuses last time's plan with the dates
   shifted. Events that repeat (dance practice, choir) can share a location and adult leaders in
   one save. Mark an event "calendar note only" when there is nothing to plan.
-- **Needs attention** — the home screen lists events in the next 45 days that lack a location, a
-  time, or two adult leaders.
+- **Needs attention** — the home screen lists events in the next 45 days that lack a location or
+  a time.
 - **Projects (SYC)** — Overview, Committees (tasks grouped by committee, with filters for mine,
   unassigned, no due date, overdue, and a bulk due-date setter), Timeline (tasks and events by
   month), Agenda (the run of show by day, with views for seniors, chaperones, and a high-level
@@ -79,6 +79,7 @@ functions; no data is changed. The older app keeps working against the newer dat
 
 ## Safety notes built in
 
-- Youth events with fewer than two adult leaders listed show a warning (General Handbook 10.8.1).
+- The Resources screen states the two-adult guidance (General Handbook 10.8.1). The app does not
+  warn about it per event; adult leaders can still be listed on an event.
 - Youth protection training is tracked in LCR, not here.
 - Verify current guidance at churchofjesuschrist.org — the Resources screen links to it.
